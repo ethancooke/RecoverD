@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>RecoverD</string>
+    <key>CFBundleDisplayName</key>
+    <string>RecoverD</string>
+    <key>CFBundleIdentifier</key>
+    <string>app.recoverd.mac</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.1.0</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleExecutable</key>
+    <string>RecoverDApp</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>14.0</string>
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.utilities</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>NSHumanReadableCopyright</key>
+    <string>Copyright 2026 RecoverD Contributors. Apache 2.0.</string>
+    <key>NSPhotoLibraryUsageDescription</key>
+    <string>RecoverD does not access your Photos library; thumbnails are generated in memory from scanned media only.</string>
+    <key>NSSupportsAutomaticTermination</key>
+    <false/>
+    <key>NSSupportsSuddenTermination</key>
+    <false/>
+    <!-- Prevent auto-launch of recovered content; we never execute recovered files. -->
+    <key>LSFileQuarantineEnabled</key>
+    <true/>
+</dict>
+</plist>

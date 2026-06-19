@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Privileged helper daemon: NOT sandboxed (sandbox forbids /dev/disk* raw access).
+         Hardened runtime + notarization still apply. Registered via SMAppService. -->
+    <key>com.apple.security.app-sandbox</key>
+    <false/>
+
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+    <!-- Allow bridging to libfsapfs and other C libraries. -->
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <false/>
+    <key>com.apple.security.cs.disable-executable-page-protection</key>
+    <false/>
+
+    <!-- The helper performs raw block reads against /dev/rdisk* on behalf of the GUI.
+         Granting /dev access requires the helper to run with elevated privileges (admin/root),
+         obtained via SMAppService daemon registration + user consent, NOT via entitlements. -->
+</dict>
+</plist>

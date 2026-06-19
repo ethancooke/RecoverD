@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- App Sandbox: ON for the GUI. Raw /dev/disk* access is NOT permitted under sandbox,
+         so the GUI never touches raw devices; it talks to the privileged helper over XPC. -->
+    <key>com.apple.security.app-sandbox</key>
+    <true/>
+
+    <!-- Hardened runtime prerequisites for sandbox. -->
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+    <!-- Needed because the engine may load libfsapfs (a signed third-party dylib) and
+         bridges to C. Tighten by removing this once libfsapfs is properly signed/bundled. -->
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <false/>
+
+    <!-- User-selected read/write for the EXPORT destination only (security-scoped bookmark). -->
+    <key>com.apple.security.files.user-selected.read-write</key>
+    <true/>
+    <!-- No files.downloads / files.movies / etc. — export goes to a user-chosen folder. -->
+
+    <!-- XPC connection to the privileged helper. Replace with the helper's bundle id. -->
+    <key>com.apple.developer.service-extensions</key>
+    <array>
+        <string>app.recoverd.helper</string>
+    </array>
+
+    <!-- Register/use the privileged helper daemon (SMAppService, macOS 13+). -->
+    <key>com.apple.developer.smapp-service</key>
+    <array>
+        <string>app.recoverd.helper</string>
+    </array>
+</dict>
+</plist>
