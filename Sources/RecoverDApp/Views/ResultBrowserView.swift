@@ -3,7 +3,7 @@ import RecoverDCore
 import RecoverDEngine
 
 /// In-memory result browser: metadata + lazy thumbnails, multi-select, and the gateway to the
-/// (only) content-writing path — Export.
+/// (only) content-writing path — Export. Double-click a file to open a full preview.
 struct ResultBrowserView: View {
     @Bindable var session: RecoverySessionViewModel
     let result: ScanResult
@@ -26,7 +26,10 @@ struct ResultBrowserView: View {
             Divider()
             List(selection: $selection) {
                 ForEach(filteredFiles) { file in
-                    ResultRow(file: file, session: session).tag(file.id)
+                    ResultRow(file: file, session: session)
+                        .tag(file.id)
+                        .contentShape(Rectangle())
+                        .onTapGesture(count: 2) { session.openPreview(for: file) }
                 }
             }
             Divider()
@@ -34,6 +37,13 @@ struct ResultBrowserView: View {
         }
         .sheet(isPresented: $presentingExport) {
             ExportView(session: session, files: selectedFiles)
+        }
+        .sheet(item: $session.previewFile) { file in
+            if let reader = session.contentReader(for: file) {
+                PreviewView(file: file, contentReader: reader)
+            } else {
+                Text("No source loaded").padding()
+            }
         }
     }
 
@@ -109,6 +119,11 @@ private struct ResultRow: View {
                 .scaledToFill()
                 .frame(width: 48, height: 48)
                 .clipShape(RoundedRectangle(cornerRadius: 6))
+        } else if session.thumbnailLoading.contains(file.id) {
+            RoundedRectangle(cornerRadius: 6)
+                .fill(.quaternary)
+                .frame(width: 48, height: 48)
+                .overlay(ProgressView().controlSize(.small))
         } else {
             RoundedRectangle(cornerRadius: 6)
                 .fill(.quaternary)

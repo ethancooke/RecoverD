@@ -10,17 +10,25 @@ public struct FileSignature: Sendable, Hashable {
     public let footer: [UInt8]?
     public let displayName: String
 
+    /// Optional allow-list for the single byte immediately following `magic`. When non-nil, a
+    /// magic match is only accepted if that next byte is in this set. This cheaply rejects the
+    /// flood of false positives that short magics (e.g. JPEG's 3-byte `FF D8 FF`) produce on
+    /// random/compressed data: a real JPEG's 4th byte is always a valid segment marker.
+    public let headerFollowSet: Set<UInt8>?
+
     public init(magic: [UInt8],
                 fileExtension: String,
                 fileType: RecoverableFileType,
                 maxExpectedSize: Int64,
                 footer: [UInt8]? = nil,
+                headerFollowSet: Set<UInt8>? = nil,
                 displayName: String) {
         self.magic = magic
         self.fileExtension = fileExtension
         self.fileType = fileType
         self.maxExpectedSize = maxExpectedSize
         self.footer = footer
+        self.headerFollowSet = headerFollowSet
         self.displayName = displayName
     }
 }
@@ -30,9 +38,13 @@ public struct FileSignature: Sendable, Hashable {
 /// driven by `ScanEngine` so progress/cancellation stay in one place.
 public protocol FileCarver: Sendable {
     var signatures: [FileSignature] { get }
+    /// Builds a `RecoverableFile` for a confirmed signature hit. `size` is the resolved on-disk
+    /// length the engine computed (footer-bounded when a footer was found, otherwise capped),
+    /// so callers don't re-derive it.
     func makeFile(signature: FileSignature,
                   offset: Int64,
-                  availableSize: Int64,
+                  size: Int64,
+                  footerFound: Bool,
                   deviceID: DeviceID) -> RecoverableFile
 }
 
@@ -42,14 +54,23 @@ public struct SignatureFileCarver: FileCarver {
 
     public init() {
         self.signatures = [
+            // JPEG: SOI + start of the first marker is `FF D8 FF`; the 4th byte is the marker
+            // code, always one of a small known set (APPn/DQT/DHT/SOFn/DRI/COM). Requiring it
+            // turns the 3-byte magic from a false-positive magnet into a usable signature.
+            // Footer is the EOI marker `FF D9`, which bounds the carve to the real image length.
             FileSignature(magic: [0xFF, 0xD8, 0xFF],
                           fileExtension: "jpg", fileType: .image,
-                          maxExpectedSize: 64 * 1024 * 1024, displayName: "JPEG image"),
+                          maxExpectedSize: 64 * 1024 * 1024,
+                          footer: [0xFF, 0xD9],
+                          headerFollowSet: SignatureFileCarver.jpegMarkerBytes,
+                          displayName: "JPEG image"),
             FileSignature(magic: [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A],
                           fileExtension: "png", fileType: .image,
                           maxExpectedSize: 64 * 1024 * 1024,
                           footer: [0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82],
                           displayName: "PNG image"),
+            // GIF's trailer is a single `0x3B` byte — far too common to use as a reliable end
+            // marker — so this stays size-capped rather than footer-bounded.
             FileSignature(magic: [0x47, 0x49, 0x46, 0x38],
                           fileExtension: "gif", fileType: .image,
                           maxExpectedSize: 64 * 1024 * 1024, displayName: "GIF image"),
@@ -64,27 +85,46 @@ public struct SignatureFileCarver: FileCarver {
             FileSignature(magic: [0x52, 0x49, 0x46, 0x46],
                           fileExtension: "avi", fileType: .video,
                           maxExpectedSize: 4 * 1024 * 1024 * 1024, displayName: "RIFF (AVI/WAV)"),
+            // ID3v2 tag: "ID3" followed by a major-version byte (2, 3, or 4). Validating it keeps
+            // this 3-byte magic from matching arbitrary "ID3" runs in binary data.
             FileSignature(magic: [0x49, 0x44, 0x33],
                           fileExtension: "mp3", fileType: .audio,
-                          maxExpectedSize: 256 * 1024 * 1024, displayName: "MP3 audio")
+                          maxExpectedSize: 256 * 1024 * 1024,
+                          headerFollowSet: [0x02, 0x03, 0x04],
+                          displayName: "MP3 audio")
         ]
     }
 
+    /// The set of valid JPEG marker codes that may immediately follow `FF D8 FF`: APP0–APP15
+    /// (`E0`–`EF`), DQT (`DB`), DHT (`C4`), DRI (`DD`), COM (`FE`), and the SOF variants
+    /// (`C0`–`C3`, `C5`–`C7`, `C9`–`CB`, `CD`–`CF`).
+    static let jpegMarkerBytes: Set<UInt8> = {
+        var set = Set<UInt8>(0xE0...0xEF)          // APPn
+        set.formUnion(0xC0...0xCF)                 // SOFn / DHT / DAC (covers C4)
+        set.remove(0xC8)                           // JPG (reserved, not used)
+        set.insert(0xDB)                           // DQT
+        set.insert(0xDD)                           // DRI
+        set.insert(0xFE)                           // COM
+        return set
+    }()
+
     public func makeFile(signature: FileSignature,
                          offset: Int64,
-                         availableSize: Int64,
+                         size: Int64,
+                         footerFound: Bool,
                          deviceID: DeviceID) -> RecoverableFile {
-        let size = min(signature.maxExpectedSize, max(0, availableSize))
         return RecoverableFile(
             id: FileID("carved:\(offset):\(signature.fileExtension)"),
             displayName: "recovered_\(offset).\(signature.fileExtension)",
             originalPath: nil,
             fileType: signature.fileType,
-            size: size,
+            size: max(0, size),
             byteOffset: offset,
             allocationStatus: .orphaned,
             sourceDeviceID: deviceID,
-            confidence: 0.6,
+            // A hit whose end marker we actually found is far more likely to be a real file than
+            // a bare magic match capped at the maximum size.
+            confidence: footerFound ? 0.85 : 0.5,
             signatureMatch: signature.displayName
         )
     }

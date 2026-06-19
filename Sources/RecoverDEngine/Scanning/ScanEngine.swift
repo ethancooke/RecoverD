@@ -189,44 +189,156 @@ public actor ScanEngine {
 
             let readCount = Int(min(Int64(chunkSize), total - offset))
             let chunk = try await reader.read(at: offset, count: readCount)
-            if chunk.count == 0 { break }
-            bytesRead += Int64(chunk.count)
+            let chunkCount = chunk.count
+            if chunkCount == 0 { break }
+            bytesRead += Int64(chunkCount)
 
+            // First pass (synchronous, inside the secure buffer): collect confirmed magic hits.
+            // We can't resolve footer-bounded sizes here because that needs async reads, so we
+            // gather the validated offsets and size them after the buffer access closes.
             let base = offset
-            chunk.withUnsafeBytes { buf in
+            let hits: [(signature: FileSignature, offset: Int64)] = chunk.withUnsafeBytes { buf in
+                var found: [(FileSignature, Int64)] = []
                 for signature in carver.signatures {
                     var cursor = 0
                     while cursor < buf.count {
                         guard let rel = findMagic(in: buf, magic: signature.magic, from: cursor) else {
                             break
                         }
-                        let absolute = base + Int64(rel)
-                        if !seenOffsets.contains(absolute) {
-                            seenOffsets.insert(absolute)
-                            let available = total - absolute
-                            let file = carver.makeFile(
-                                signature: signature,
-                                offset: absolute,
-                                availableSize: available,
-                                deviceID: device.id
-                            )
-                            files.append(file)
-                            progress.filesFound = files.count
-                        }
                         cursor = rel + 1
+                        // Validate the byte after the magic when the signature demands it. If the
+                        // magic lands at the very end of the chunk the follow byte isn't available
+                        // yet — skip without recording it so the next (overlapping) chunk retries.
+                        if let followSet = signature.headerFollowSet {
+                            let followIdx = rel + signature.magic.count
+                            guard followIdx < buf.count else { continue }
+                            guard followSet.contains(buf[followIdx]) else { continue }
+                        }
+                        let absolute = base + Int64(rel)
+                        if seenOffsets.insert(absolute).inserted {
+                            found.append((signature, absolute))
+                        }
                     }
                 }
+                return found
             }
             chunk.wipe()
 
-            progress.bytesScanned = min(total, offset + Int64(chunk.count))
+            // Second pass: resolve each hit's real size by locating its footer, then record it.
+            for hit in hits {
+                let (size, footerFound) = try await resolveCarvedSize(
+                    signature: hit.signature, start: hit.offset, total: total, reader: reader
+                )
+                files.append(carver.makeFile(
+                    signature: hit.signature,
+                    offset: hit.offset,
+                    size: size,
+                    footerFound: footerFound,
+                    deviceID: device.id
+                ))
+                progress.filesFound = files.count
+            }
+
+            progress.bytesScanned = min(total, offset + Int64(chunkCount))
             broadcast()
 
-            offset += Int64(chunk.count)
+            offset += Int64(chunkCount)
             if offset < total {
                 offset -= Int64(overlap)
             }
         }
+    }
+
+    /// Resolves the on-disk length of a carved file starting at `start`.
+    ///
+    /// When the signature has an end marker we scan forward (bounded by `maxExpectedSize`) for it
+    /// and size the file up to and including it. The scan reads through the source's `SecureData`
+    /// and wipes each window, so no recovered content lingers. If no marker is found within the
+    /// bound — or the signature has none — we fall back to the capped maximum so a real but
+    /// unterminated file is still recoverable (ImageIO and friends stop at the real end anyway).
+    ///
+    /// Returns `(size, footerFound)`.
+    private func resolveCarvedSize(
+        signature: FileSignature, start: Int64, total: Int64, reader: any RawBlockReader
+    ) async throws -> (Int64, Bool) {
+        let available = total - start
+        let capped = min(signature.maxExpectedSize, max(0, available))
+        guard capped > Int64(signature.magic.count) else { return (capped, false) }
+        let limit = start + capped
+
+        // JPEG: the trailer `FF D9` also terminates the embedded EXIF thumbnail, so the *first*
+        // one would truncate the photo. Depth-count nested SOI/EOI pairs and stop at the outer EOI.
+        if signature.footer == [0xFF, 0xD9] {
+            if let end = try await findJPEGEnd(start: start, limit: limit, reader: reader) {
+                return (min(end - start, capped), true)
+            }
+            return (capped, false)
+        }
+
+        guard let footer = signature.footer else { return (capped, false) }
+        if let end = try await findFirstFooter(
+            footer: footer, from: start + Int64(signature.magic.count), limit: limit, reader: reader
+        ) {
+            return (min(end - start, capped), true)
+        }
+        return (capped, false)
+    }
+
+    /// Scans for the outer JPEG `FF D9`, counting nested `FF D8 … FF D9` pairs (EXIF thumbnails)
+    /// so the carve isn't cut short at the thumbnail's end. Returns the absolute offset just past
+    /// the outer EOI, or nil if the image doesn't terminate within `limit`.
+    private func findJPEGEnd(start: Int64, limit: Int64, reader: any RawBlockReader) async throws -> Int64? {
+        let window = 1 << 20
+        var pos = start + 2 // skip the leading SOI (`FF D8`); the outer image counts as depth 1
+        var depth = 1
+        while pos < limit {
+            let toRead = Int(min(Int64(window), limit - pos))
+            if toRead < 2 { break }
+            let block = try await reader.read(at: pos, count: toRead)
+            let n = block.count
+            if n < 2 { block.wipe(); break }
+            let end: Int64? = block.withUnsafeBytes { buf in
+                var i = 0
+                while i + 1 < buf.count {
+                    guard buf[i] == 0xFF else { i += 1; continue }
+                    switch buf[i + 1] {
+                    case 0xD8: depth += 1
+                    case 0xD9:
+                        depth -= 1
+                        if depth == 0 { return pos + Int64(i) + 2 }
+                    default: break
+                    }
+                    i += 2
+                }
+                return nil
+            }
+            block.wipe()
+            if let end { return end }
+            // Re-read the final byte next iteration in case a marker straddles the boundary.
+            pos += Int64(max(1, n - 1))
+        }
+        return nil
+    }
+
+    /// Scans forward for the first occurrence of `footer`, returning the absolute offset just past
+    /// it, or nil if not found within `limit`. Used for unique terminal markers (PNG IEND, %%EOF).
+    private func findFirstFooter(
+        footer: [UInt8], from searchStart: Int64, limit: Int64, reader: any RawBlockReader
+    ) async throws -> Int64? {
+        let window = 1 << 20
+        var pos = searchStart
+        while pos < limit {
+            let toRead = Int(min(Int64(window), limit - pos))
+            if toRead < footer.count { break }
+            let block = try await reader.read(at: pos, count: toRead)
+            let n = block.count
+            if n < footer.count { block.wipe(); break }
+            let rel = block.withUnsafeBytes { findMagic(in: $0, magic: footer, from: 0) }
+            block.wipe()
+            if let rel { return pos + Int64(rel) + Int64(footer.count) }
+            pos += Int64(max(1, n - (footer.count - 1)))
+        }
+        return nil
     }
 }
 

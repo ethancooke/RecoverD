@@ -36,9 +36,15 @@ struct ScanEngineTests {
         let size = 1_000_000
         var bytes = [UInt8](repeating: 0, count: size)
         let offset = 100_000
+        // A minimally valid header: SOI + APP0 marker (`FF D8 FF E0`) so it passes follow-byte
+        // validation, then an EOI (`FF D9`) 5_000 bytes later to bound the carve.
         bytes[offset] = 0xFF
         bytes[offset + 1] = 0xD8
         bytes[offset + 2] = 0xFF
+        bytes[offset + 3] = 0xE0
+        let jpegLength = 5_000
+        bytes[offset + jpegLength - 2] = 0xFF
+        bytes[offset + jpegLength - 1] = 0xD9
 
         let reader = InMemoryBlockReader(bytes)
         let device = DeviceInfo(
@@ -61,8 +67,45 @@ struct ScanEngineTests {
 
         let snapshot = await engine.snapshot()
         #expect(snapshot.files.count >= 1)
-        #expect(snapshot.files.contains { $0.byteOffset == Int64(offset) })
-        #expect(snapshot.files.contains { $0.fileType == .image })
+        let carved = try #require(snapshot.files.first { $0.byteOffset == Int64(offset) })
+        #expect(carved.fileType == .image)
+        // The carve is bounded by the planted EOI, not the 64 MB max.
+        #expect(carved.size == Int64(jpegLength))
+        await engine.clear()
+    }
+
+    @Test("Carved JPEG extends past an embedded thumbnail's EOI to the outer EOI")
+    func carveJPEGSkipsThumbnailEOI() async throws {
+        let size = 200_000
+        var bytes = [UInt8](repeating: 0, count: size)
+        let offset = 10_000
+
+        // Outer image header: SOI + APP1 (EXIF).
+        bytes.replaceSubrange(offset..<offset + 4, with: [0xFF, 0xD8, 0xFF, 0xE1])
+        // Nested EXIF thumbnail: a complete `FF D8 … FF D9` 2_000 bytes in.
+        let thumbStart = offset + 2_000
+        bytes.replaceSubrange(thumbStart..<thumbStart + 4, with: [0xFF, 0xD8, 0xFF, 0xE0])
+        let thumbEOI = thumbStart + 500
+        bytes.replaceSubrange(thumbEOI..<thumbEOI + 2, with: [0xFF, 0xD9])
+        // Outer EOI much later — this is the real end of the file.
+        let outerEOI = offset + 50_000
+        bytes.replaceSubrange(outerEOI..<outerEOI + 2, with: [0xFF, 0xD9])
+
+        let reader = InMemoryBlockReader(bytes)
+        let device = DeviceInfo(
+            id: DeviceID("t"), displayName: "t", bsdName: "x", devicePath: "/x", rawPath: "/x",
+            totalSize: Int64(size), blockSize: 512, isRemovable: true, isExternal: true
+        )
+
+        let engine = ScanEngine()
+        await engine.startScan(device: device, mode: .deep, reader: reader)
+        let stream = await engine.subscribeProgress()
+        for await update in stream where update.phase == .complete { break }
+
+        let snapshot = await engine.snapshot()
+        let carved = try #require(snapshot.files.first { $0.byteOffset == Int64(offset) })
+        // Size must reach the outer EOI, not stop at the thumbnail's EOI.
+        #expect(carved.size == Int64(outerEOI + 2 - offset))
         await engine.clear()
     }
 

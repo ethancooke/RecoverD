@@ -33,7 +33,7 @@ struct ContentView: View {
                 errorBanner(error)
             }
             switch session.progress.phase {
-            case .discovering, .parsing, .carving, .finalizing:
+            case .imaging, .discovering, .parsing, .carving, .finalizing:
                 ScanProgressView(session: session)
             case .complete, .cancelled, .failed:
                 if let result = session.result, !result.files.isEmpty {
