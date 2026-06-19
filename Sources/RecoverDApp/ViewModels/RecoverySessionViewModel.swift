@@ -58,6 +58,7 @@ final class RecoverySessionViewModel {
 
     let engine = ScanEngine()
     private var reader: (any RawBlockReader)?
+    private var rawReader: RawFDReader?
     private var imageReader: DeviceImageReader?
     private var progressTask: Task<Void, Never>?
     private var devicePollTask: Task<Void, Never>?
@@ -134,11 +135,13 @@ final class RecoverySessionViewModel {
 
     // MARK: Scanning
 
-    /// Attempts to scan a real external device. Tries multiple strategies in order:
-    ///   1. If the volume is mounted, scan the filesystem for live files (no privilege needed)
-    ///      AND try authorized raw reads for deleted files + carving.
-    ///   2. If not mounted, use AuthorizedRawReader (admin auth dialog) for raw device access.
-    ///   3. Fall back to URLBlockReader (works for image files).
+    /// Scans a real external device by reading its raw partition directly.
+    ///   1. If the volume is mounted, enumerate live files via the filesystem (no privilege)
+    ///      AND read the raw partition for deleted files + carving.
+    ///   2. If not mounted, read the raw partition directly.
+    ///
+    /// Raw reads go through `authopen` (one admin prompt) into wiped `SecureData` — the device is
+    /// never copied to the Mac's storage or fully buffered in memory.
     func startScanOnSelectedDevice() async {
         guard let device = selectedDevice else { lastError = "Select a device first."; return }
 
@@ -148,47 +151,30 @@ final class RecoverySessionViewModel {
             return
         }
 
-        // Strategy 2: create a .dmg image of the device via hdiutil (has device-read entitlements),
-        // then scan the image. If the device has partitions with file systems, image the partition
-        // (not the whole disk) so the parser sees the filesystem boot sector, not the MBR/GPT.
-        let (imageBSD, imageSize) = bestPartitionToScan(device)
-        isImaging = true
-        imagingBytesDone = 0
-        imagingBytesTotal = imageSize
-        progress = ScanProgress(totalBytes: imageSize, phase: .imaging)
-
-        let reader = DeviceImageReader(
-            bsdName: imageBSD,
-            totalSize: imageSize,
-            blockSize: device.blockSize
-        )
-        self.imageReader = reader
-
-        // Subscribe to imaging progress BEFORE calling prepare()
-        let imgStream = await reader.imagingProgress
-        let imgProgressTask = Task { [weak self] in
-            for await p in imgStream {
-                guard let self else { return }
-                self.imagingBytesDone = p.bytesWritten
-                self.imagingBytesTotal = p.totalBytes
-            }
-        }
-
+        // Strategy 2: read the raw partition (the one carrying a file system, so the parser sees
+        // the FS boot sector rather than the MBR/GPT) directly via an authorized fd.
+        let (bsd, size) = bestPartitionToScan(device)
         do {
-            try await reader.prepare()
-            imgProgressTask.cancel()
-            isImaging = false
-            scanStrategy = .imageFile
+            let reader = try await openRawReader(bsdName: bsd, size: size, blockSize: device.blockSize)
+            scanStrategy = .authorizedRaw
             await startScan(device: device, reader: reader)
         } catch {
-            imgProgressTask.cancel()
-            isImaging = false
-            lastError = "Cannot read \(device.rawPath). \(error.localizedDescription)"
+            lastError = "Cannot read \(device.rawPath) directly. \(error.localizedDescription)"
         }
     }
 
-    /// Scans a mounted volume: enumerates live files via the filesystem, then attempts raw
-    /// device reads (with admin auth) for deleted-file recovery and carving.
+    /// Opens an authorized, read-only fd to `/dev/r{bsdName}` and wraps it in a `RawFDReader`.
+    /// Closes any previously opened raw reader first.
+    private func openRawReader(bsdName: String, size: Int64, blockSize: Int) async throws -> RawFDReader {
+        await rawReader?.close()
+        let fd = try await PrivilegedRawDevice.openReadOnly(rawPath: "/dev/r\(bsdName)")
+        let reader = RawFDReader(fd: fd, totalSize: size, blockSize: blockSize)
+        rawReader = reader
+        return reader
+    }
+
+    /// Scans a mounted volume: enumerates live files via the filesystem, then reads the raw
+    /// partition (with admin auth) for deleted-file recovery and carving.
     private func startMountedScan(device: DeviceInfo, mountPoint: URL) async {
         scanStrategy = .mountedFilesystem
         lastError = nil
@@ -200,46 +186,19 @@ final class RecoverySessionViewModel {
         let scanner = MountedVolumeScanner(mountPoint: mountPoint, deviceID: device.id)
         let liveFiles = await scanner.scan()
 
-        // 2. Try to get a raw reader for deleted-file recovery + carving.
-        //    Use hdiutil to create a .dmg of the device (has Apple entitlements to read raw devices).
-        let partitionBSD = device.partitions
-            .first(where: { $0.mountPoint?.path == mountPoint.path })?.bsdName
-            ?? device.bsdName
-        let partitionSize = device.partitions
-            .first(where: { $0.mountPoint?.path == mountPoint.path })?.size
-            ?? device.totalSize
-
-        isImaging = true
-        imagingBytesDone = 0
-        imagingBytesTotal = partitionSize
-        progress = ScanProgress(totalBytes: partitionSize, phase: .imaging)
-
-        let rawReader = DeviceImageReader(
-            bsdName: partitionBSD,
-            totalSize: partitionSize,
-            blockSize: device.blockSize
-        )
-        self.imageReader = rawReader
-
-        // Subscribe to imaging progress
-        let imgStream = await rawReader.imagingProgress
-        let imgTask = Task { [weak self] in
-            for await p in imgStream {
-                guard let self else { return }
-                self.imagingBytesDone = p.bytesWritten
-                self.imagingBytesTotal = p.totalBytes
-            }
-        }
+        // 2. Read the raw partition directly for deleted-file recovery + carving.
+        let partition = device.partitions.first(where: { $0.mountPoint?.path == mountPoint.path })
+        let partitionBSD = partition?.bsdName ?? device.bsdName
+        let partitionSize = partition?.size ?? device.totalSize
 
         do {
-            try await rawReader.prepare()
-            imgTask.cancel()
-            isImaging = false
+            let reader = try await openRawReader(
+                bsdName: partitionBSD, size: partitionSize, blockSize: device.blockSize
+            )
             scanStrategy = .mountedFilesystemWithRaw
-            await startScanWithMergedFiles(device: device, reader: rawReader, liveFiles: liveFiles)
+            await startScanWithMergedFiles(device: device, reader: reader, liveFiles: liveFiles)
         } catch {
-            // hdiutil failed (user cancelled auth, or device unavailable).
-            // Still show the live files from the filesystem scan.
+            // Auth declined or the device is unavailable — still show the live files we found.
             scanStrategy = .mountedFilesystem
             self.reader = nil
             let scanResult = ScanResult(
@@ -370,6 +329,9 @@ final class RecoverySessionViewModel {
         progress = ScanProgress()
         lastError = nil
         await engine.clear()
+        await rawReader?.close()
+        rawReader = nil
+        reader = nil
     }
 
     func snapshot() async {

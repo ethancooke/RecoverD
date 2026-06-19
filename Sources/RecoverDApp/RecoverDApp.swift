@@ -20,6 +20,18 @@ struct RecoverDApp: App {
 /// guarantees zeroing of all `SecureData` buffers and thumbnail caches before exit is a tracked
 /// hardening item (e.g. a shared `MemoryHygiene` actor that every holder registers with).
 final class RecoverDAppDelegate: NSObject, NSApplicationDelegate {
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        // When run as a bare executable (not inside a .app bundle), macOS doesn't give the
+        // process a regular activation policy, so the window can launch hidden behind other apps
+        // with no Dock icon. Force a regular, foreground app and bring the window forward.
+        NSApp.setActivationPolicy(.regular)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        true
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
         // No-op for now; ContentView clears its session on disappear. See note above.
     }
