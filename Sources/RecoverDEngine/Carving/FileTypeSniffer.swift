@@ -43,11 +43,13 @@ public enum FileTypeSniffer {
                                         fileType: riff.fileType, displayName: riff.displayName)
             }
             if sig.container == .tiff {
-                // Canon CR2: little-endian TIFF with "CR" at offset 8.
-                if sig.magic[0] == 0x49, bytes.count >= 10, bytes[8] == 0x43, bytes[9] == 0x52 {
+                // Canon CR2: a generic little-endian TIFF with "CR" at offset 8.
+                if sig.fileExtension == "tiff", bytes[0] == 0x49,
+                   bytes.count >= 10, bytes[8] == 0x43, bytes[9] == 0x52 {
                     return DetectedFileType(fileExtension: "cr2", fileType: .image, displayName: "Canon RAW")
                 }
-                return DetectedFileType(fileExtension: "tiff", fileType: .image, displayName: sig.displayName)
+                return DetectedFileType(fileExtension: sig.fileExtension,
+                                        fileType: .image, displayName: sig.displayName)
             }
             return DetectedFileType(fileExtension: sig.fileExtension,
                                     fileType: sig.fileType, displayName: sig.displayName)

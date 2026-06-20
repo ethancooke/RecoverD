@@ -104,13 +104,16 @@ public struct SignatureFileCarver: FileCarver {
                           fileExtension: "tiff", fileType: .image,
                           maxExpectedSize: 128 * 1024 * 1024,
                           container: .tiff, displayName: "TIFF/RAW image"),
-            // Camera RAW with distinctive magics (no EXIF-collision risk).
+            // Camera RAW with distinctive magics (no EXIF-collision risk). ORF/RW2 are TIFF-based,
+            // so they go through the IFD sizer too (their "magic number" just isn't 42).
             FileSignature(magic: [0x49, 0x49, 0x52, 0x4F],            // "IIRO"
                           fileExtension: "orf", fileType: .image,
-                          maxExpectedSize: 128 * 1024 * 1024, displayName: "Olympus RAW"),
+                          maxExpectedSize: 128 * 1024 * 1024,
+                          container: .tiff, displayName: "Olympus RAW"),
             FileSignature(magic: [0x49, 0x49, 0x55, 0x00],            // "IIU\0"
                           fileExtension: "rw2", fileType: .image,
-                          maxExpectedSize: 128 * 1024 * 1024, displayName: "Panasonic RAW"),
+                          maxExpectedSize: 128 * 1024 * 1024,
+                          container: .tiff, displayName: "Panasonic RAW"),
             FileSignature(magic: [0x46, 0x55, 0x4A, 0x49, 0x46, 0x49, 0x4C, 0x4D], // "FUJIFILM"
                           fileExtension: "raf", fileType: .image,
                           maxExpectedSize: 128 * 1024 * 1024, displayName: "Fujifilm RAW"),

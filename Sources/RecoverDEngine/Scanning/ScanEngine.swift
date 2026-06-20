@@ -262,7 +262,7 @@ public actor ScanEngine {
                             }
                             guard seenOffsets.insert(absolute).inserted else { continue }
                             var ext = signature.fileExtension, name = signature.displayName
-                            if signature.magic[0] == 0x49, rel + 10 <= buf.count,
+                            if signature.fileExtension == "tiff", rel + 10 <= buf.count,
                                buf[rel + 8] == 0x43, buf[rel + 9] == 0x52 { // "CR" ⇒ Canon CR2
                                 ext = "cr2"; name = "Canon RAW"
                             }
@@ -297,9 +297,12 @@ public actor ScanEngine {
                 let cap = min(tiffMaxSize, total - hit.start)
                 let (size, valid) = try await resolveTIFFSize(start: hit.start, cap: cap, reader: reader)
                 guard valid else { continue }
+                // RAW is always multi-MB; a tiny parsed size means we missed a vendor-specific
+                // raw-data tag, so keep the cap rather than truncate the recovery.
+                let resolved = (hit.ext != "tiff" && size < 1_000_000) ? cap : size
                 files.append(carver.makeContainerFile(
                     fileExtension: hit.ext, fileType: .image, displayName: hit.name,
-                    offset: hit.start, size: size, confidence: 0.75, deviceID: device.id
+                    offset: hit.start, size: resolved, confidence: 0.75, deviceID: device.id
                 ))
                 progress.filesFound = files.count
             }
@@ -484,7 +487,9 @@ public actor ScanEngine {
             return be ? (Int64(a[i]) << 24 | Int64(a[i + 1]) << 16 | Int64(a[i + 2]) << 8 | Int64(a[i + 3]))
                       : (Int64(a[i + 3]) << 24 | Int64(a[i + 2]) << 16 | Int64(a[i + 1]) << 8 | Int64(a[i]))
         }
-        guard u16(header, 2) == 42 else { return (cap, false) }
+        // Not checking the magic number here: classic TIFF is 42, but TIFF-based RAW use their own
+        // (ORF "RO", RW2 0x55, …). The 4-byte signature already identified the format, and the IFD
+        // structure validation below is what rejects random II*/MM* matches.
 
         var maxEnd: Int64 = 8
         var queue: [Int64] = [u32(header, 4)]
