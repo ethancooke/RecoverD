@@ -1,7 +1,7 @@
 import SwiftUI
 import AppKit
 import AVKit
-import AVFoundation
+@preconcurrency import AVFoundation
 import RecoverDEngine
 
 /// Video/audio preview using AVKit. Plays directly from the source device via
@@ -59,9 +59,8 @@ struct VideoPreviewView: View {
         let asset = loader.makeAsset()
 
         do {
-            let duration = try await asset.load(.duration)
-            let tracks = try await asset.load(.tracks)
-            if tracks.isEmpty {
+            let isPlayable = try await asset.load(.isPlayable)
+            if !isPlayable {
                 await MainActor.run {
                     self.loadError = "No playable tracks found. The file may be corrupted or in an unsupported format."
                     self.isLoading = false
@@ -75,7 +74,6 @@ struct VideoPreviewView: View {
                 self.player?.play()
                 self.isLoading = false
             }
-            _ = duration
         } catch {
             await MainActor.run {
                 self.loadError = "Couldn't play this \(audioOnly ? "audio" : "video") here. If it was "
