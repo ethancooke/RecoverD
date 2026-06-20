@@ -155,15 +155,31 @@ struct ScanEngineTests {
         await engine.clear()
     }
 
-    @Test("Deep scan carves standalone TIFF but skips a TIFF header embedded in JPEG EXIF")
-    func carveTIFFSkipsEmbeddedEXIF() async throws {
+    @Test("TIFF carve: sizes a valid IFD, rejects noise + embedded EXIF")
+    func carveTIFFValidatesAndSizes() async throws {
         let size = 200_000
         var bytes = [UInt8](repeating: 0, count: size)
-        // A standalone TIFF.
-        let standalone = 20_000
-        bytes.replaceSubrange(standalone..<standalone + 4, with: [0x49, 0x49, 0x2A, 0x00])
-        // A TIFF header embedded in a JPEG's EXIF (preceded by "Exif\0\0") — must NOT be carved.
-        let exifTiff = 60_000
+
+        // A minimal but valid little-endian TIFF: header → IFD at +8 with one entry, next=0.
+        func writeValidTIFF(at o: Int) {
+            bytes.replaceSubrange(o..<o + 4, with: [0x49, 0x49, 0x2A, 0x00]) // II*\0
+            bytes.replaceSubrange(o + 4..<o + 8, with: [0x08, 0x00, 0x00, 0x00]) // IFD0 @ 8
+            bytes.replaceSubrange(o + 8..<o + 10, with: [0x01, 0x00]) // 1 entry
+            // tag 0x0100 (ImageWidth), type 3 (SHORT), count 1, value 100
+            bytes.replaceSubrange(o + 10..<o + 22,
+                with: [0x00, 0x01, 0x03, 0x00, 0x01, 0x00, 0x00, 0x00, 0x64, 0x00, 0x00, 0x00])
+            bytes.replaceSubrange(o + 22..<o + 26, with: [0x00, 0x00, 0x00, 0x00]) // next IFD = 0
+        }
+
+        let valid = 20_000
+        writeValidTIFF(at: valid) // 26-byte TIFF
+
+        // Bare II*\0 with a zero IFD pointer — noise, must be rejected by IFD validation.
+        let noise = 50_000
+        bytes.replaceSubrange(noise..<noise + 4, with: [0x49, 0x49, 0x2A, 0x00])
+
+        // TIFF header embedded in JPEG EXIF (preceded by "Exif\0\0") — skipped before validation.
+        let exifTiff = 80_000
         bytes.replaceSubrange(exifTiff - 6..<exifTiff, with: Array("Exif".utf8) + [0x00, 0x00])
         bytes.replaceSubrange(exifTiff..<exifTiff + 4, with: [0x49, 0x49, 0x2A, 0x00])
 
@@ -178,8 +194,11 @@ struct ScanEngineTests {
         for await update in stream where update.phase == .complete { break }
         let files = await engine.snapshot().files
 
-        #expect(files.first { $0.byteOffset == Int64(standalone) }?.fileType == .image)
-        #expect(!files.contains { $0.byteOffset == Int64(exifTiff) })
+        let carved = try #require(files.first { $0.byteOffset == Int64(valid) })
+        #expect(carved.fileType == .image)
+        #expect(carved.size == 26) // sized from the IFD, not the 128 MB cap
+        #expect(!files.contains { $0.byteOffset == Int64(noise) })   // invalid IFD rejected
+        #expect(!files.contains { $0.byteOffset == Int64(exifTiff) }) // EXIF skipped
         await engine.clear()
     }
 

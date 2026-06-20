@@ -182,6 +182,8 @@ public actor ScanEngine {
         // Size cap for the ISO-BMFF box walk (falls back if the signature is ever removed).
         let isoMaxSize = carver.signatures.first { $0.container == .isoBMFF }?.maxExpectedSize
             ?? (16 * 1024 * 1024 * 1024)
+        let tiffMaxSize = carver.signatures.first { $0.container == .tiff }?.maxExpectedSize
+            ?? (128 * 1024 * 1024)
 
         while offset < total {
             try Task.checkCancellation()
@@ -200,12 +202,14 @@ public actor ScanEngine {
             // We can't resolve footer-bounded sizes here because that needs async reads, so we
             // gather the validated offsets and size them after the buffer access closes.
             let base = offset
-            let (hits, riffFiles, isoHits):
-                ([(signature: FileSignature, offset: Int64)], [RecoverableFile], [(start: Int64, brand: String)]) =
+            let (hits, riffFiles, isoHits, tiffHits):
+                ([(signature: FileSignature, offset: Int64)], [RecoverableFile],
+                 [(start: Int64, brand: String)], [(start: Int64, ext: String, name: String)]) =
             chunk.withUnsafeBytes { buf in
                 var found: [(FileSignature, Int64)] = []
                 var riff: [RecoverableFile] = []
                 var iso: [(start: Int64, brand: String)] = []
+                var tiff: [(start: Int64, ext: String, name: String)] = []
                 for signature in carver.signatures {
                     var cursor = 0
                     while cursor < buf.count {
@@ -248,7 +252,8 @@ public actor ScanEngine {
 
                         // TIFF / TIFF-based RAW. Skip the copy embedded in JPEG EXIF (preceded by
                         // "Exif\0\0"), otherwise every photo would yield a bogus image. Label Canon
-                        // CR2 (little-endian TIFF with "CR" at offset 8); size is capped.
+                        // CR2 (little-endian TIFF with "CR" at offset 8). The IFDs are parsed in the
+                        // async pass below to size it and confirm it's a real TIFF (not noise).
                         if signature.container == .tiff {
                             if rel >= 6,
                                buf[rel - 6] == 0x45, buf[rel - 5] == 0x78, buf[rel - 4] == 0x69,
@@ -261,10 +266,7 @@ public actor ScanEngine {
                                buf[rel + 8] == 0x43, buf[rel + 9] == 0x52 { // "CR" ⇒ Canon CR2
                                 ext = "cr2"; name = "Canon RAW"
                             }
-                            let size = min(signature.maxExpectedSize, total - absolute)
-                            riff.append(carver.makeContainerFile(
-                                fileExtension: ext, fileType: .image, displayName: name,
-                                offset: absolute, size: size, confidence: 0.6, deviceID: device.id))
+                            tiff.append((absolute, ext, name))
                             continue
                         }
 
@@ -281,12 +283,24 @@ public actor ScanEngine {
                         }
                     }
                 }
-                return (found, riff, iso)
+                return (found, riff, iso, tiff)
             }
             chunk.wipe()
 
             for file in riffFiles {
                 files.append(file)
+                progress.filesFound = files.count
+            }
+
+            // TIFF/RAW: parse the IFDs to size it and confirm validity; drop noise hits.
+            for hit in tiffHits {
+                let cap = min(tiffMaxSize, total - hit.start)
+                let (size, valid) = try await resolveTIFFSize(start: hit.start, cap: cap, reader: reader)
+                guard valid else { continue }
+                files.append(carver.makeContainerFile(
+                    fileExtension: hit.ext, fileType: .image, displayName: hit.name,
+                    offset: hit.start, size: size, confidence: 0.75, deviceID: device.id
+                ))
                 progress.filesFound = files.count
             }
 
@@ -443,6 +457,105 @@ public actor ScanEngine {
         return (min(max(pos - start, 0), cap), hasMoov)
     }
 
+    /// Parses the TIFF IFD chain (and SubIFDs) from `start` to find the file's real end and confirm
+    /// it's a genuine TIFF — a random `II*\0`/`MM\0*` match yields an implausible IFD and is
+    /// rejected (`valid == false`). Sizing follows the strip/tile offset+bytecount tags. Bounded by
+    /// `cap`; on anything unparseable it returns `(cap, valid)` so a real-but-odd file isn't lost.
+    private func resolveTIFFSize(start: Int64, cap: Int64, reader: any RawBlockReader) async throws
+        -> (size: Int64, valid: Bool) {
+        func bytes(_ at: Int64, _ n: Int) async throws -> [UInt8] {
+            guard n > 0, at >= start, at < start + cap else { return [] }
+            let d = try await reader.read(at: at, count: n)
+            defer { d.wipe() }
+            return d.withUnsafeBytes { Array($0) }
+        }
+        let header = try await bytes(start, 8)
+        guard header.count >= 8 else { return (cap, false) }
+        let be: Bool
+        if header[0] == 0x4D, header[1] == 0x4D { be = true }
+        else if header[0] == 0x49, header[1] == 0x49 { be = false }
+        else { return (cap, false) }
+        func u16(_ a: [UInt8], _ i: Int) -> Int {
+            guard i + 2 <= a.count else { return -1 }
+            return be ? (Int(a[i]) << 8 | Int(a[i + 1])) : (Int(a[i + 1]) << 8 | Int(a[i]))
+        }
+        func u32(_ a: [UInt8], _ i: Int) -> Int64 {
+            guard i + 4 <= a.count else { return -1 }
+            return be ? (Int64(a[i]) << 24 | Int64(a[i + 1]) << 16 | Int64(a[i + 2]) << 8 | Int64(a[i + 3]))
+                      : (Int64(a[i + 3]) << 24 | Int64(a[i + 2]) << 16 | Int64(a[i + 1]) << 8 | Int64(a[i]))
+        }
+        guard u16(header, 2) == 42 else { return (cap, false) }
+
+        var maxEnd: Int64 = 8
+        var queue: [Int64] = [u32(header, 4)]
+        var visited = Set<Int64>()
+        var validIFD = false
+        var guardCount = 0
+
+        while let ifdOff = queue.popLast(), guardCount < 64 {
+            guardCount += 1
+            guard ifdOff >= 8, ifdOff + 2 <= cap, visited.insert(ifdOff).inserted else { continue }
+            let cnt = try await bytes(start + ifdOff, 2)
+            let n = u16(cnt, 0)
+            guard n >= 1, n <= 4096 else { continue } // implausible entry count ⇒ not a real IFD
+            let body = try await bytes(start + ifdOff + 2, n * 12 + 4)
+            guard body.count >= n * 12 else { continue }
+            validIFD = true
+            maxEnd = max(maxEnd, ifdOff + 2 + Int64(n) * 12 + 4)
+
+            var stripOffsets: [Int64] = []
+            var stripCounts: [Int64] = []
+            var pending: [(tag: Int, type: Int, count: Int, at: Int64)] = []
+
+            func decode(tag: Int, values: [Int64]) {
+                switch tag {
+                case 273, 324: stripOffsets = values            // Strip/TileOffsets
+                case 279, 325: stripCounts = values             // Strip/TileByteCounts
+                case 330: queue.append(contentsOf: values)      // SubIFDs
+                default: break
+                }
+            }
+
+            for e in 0..<n {
+                let o = e * 12
+                let type = u16(body, o + 2), count = Int(u32(body, o + 4))
+                let ts = tiffTypeSize(type)
+                guard ts > 0, count > 0, count <= 1 << 24 else { continue }
+                let dataBytes = Int64(count) * Int64(ts)
+                // Any field whose value doesn't fit in the 4-byte entry is stored out-of-line and
+                // occupies file space — count it toward the end (covers the strip arrays, ColorMap,
+                // ASCII tags, etc., which sips and cameras place after the image data).
+                if dataBytes > 4 { maxEnd = max(maxEnd, u32(body, o + 8) + dataBytes) }
+
+                let tag = u16(body, o)
+                guard tag == 273 || tag == 324 || tag == 279 || tag == 325 || tag == 330 else { continue }
+                if dataBytes <= 4 {
+                    let values = (0..<count).map { k -> Int64 in
+                        ts == 2 ? Int64(u16(body, o + 8 + k * 2)) : u32(body, o + 8 + k * 4)
+                    }
+                    decode(tag: tag, values: values)
+                } else {
+                    pending.append((tag, type, count, start + u32(body, o + 8)))
+                }
+            }
+            if u32(body, n * 12) != 0 { queue.append(u32(body, n * 12)) } // next IFD
+
+            for p in pending {
+                let arr = try await bytes(p.at, min(p.count * tiffTypeSize(p.type), 1 << 20))
+                let have = arr.count / tiffTypeSize(p.type)
+                let values = (0..<min(p.count, have)).map { k -> Int64 in
+                    tiffTypeSize(p.type) == 2 ? Int64(u16(arr, k * 2)) : u32(arr, k * 4)
+                }
+                decode(tag: p.tag, values: values)
+            }
+            for i in 0..<min(stripOffsets.count, stripCounts.count) {
+                maxEnd = max(maxEnd, stripOffsets[i] + stripCounts[i])
+            }
+        }
+        guard validIFD else { return (cap, false) }
+        return (min(max(maxEnd, 8), cap), true)
+    }
+
     /// Scans forward for the first occurrence of `footer`, returning the absolute offset just past
     /// it, or nil if not found within `limit`. Used for unique terminal markers (PNG IEND, %%EOF).
     private func findFirstFooter(
@@ -485,6 +598,18 @@ private func parseRIFFFile(in buf: UnsafeRawBufferPointer, at rel: Int, absolute
     return carver.makeContainerFile(fileExtension: form.fileExtension, fileType: form.fileType,
                                     displayName: form.displayName, offset: absolute, size: size,
                                     deviceID: deviceID)
+}
+
+/// Byte size of a TIFF field type (BYTE/ASCII=1, SHORT=2, LONG/IFD=4, RATIONAL/LONG8=8). 0 if
+/// unknown. Used to read strip/tile offset & byte-count arrays during TIFF sizing.
+private func tiffTypeSize(_ type: Int) -> Int {
+    switch type {
+    case 1, 2, 6, 7: return 1
+    case 3, 8: return 2
+    case 4, 9, 11, 13: return 4
+    case 5, 10, 12, 16, 17, 18: return 8
+    default: return 0
+    }
 }
 
 private func findMagic(in buf: UnsafeRawBufferPointer, magic: [UInt8], from start: Int) -> Int? {
