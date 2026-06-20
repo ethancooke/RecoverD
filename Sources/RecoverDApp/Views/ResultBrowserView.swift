@@ -10,10 +10,25 @@ struct ResultBrowserView: View {
 
     @State private var selection: Set<FileID> = []
     @State private var typeFilter: RecoverableFileType?
+    @State private var sortKey: FileSortKey = .found
     @State private var presentingExport = false
 
     private var filteredFiles: [RecoverableFile] {
         result.files.filter { typeFilter == nil || $0.fileType == typeFilter }
+    }
+
+    /// `filteredFiles` in the chosen order. Default keeps discovery order.
+    private var sortedFiles: [RecoverableFile] {
+        switch sortKey {
+        case .found: return filteredFiles
+        case .largest: return filteredFiles.sorted { $0.size > $1.size }
+        case .smallest: return filteredFiles.sorted { $0.size < $1.size }
+        case .name:
+            return filteredFiles.sorted {
+                $0.displayName.localizedStandardCompare($1.displayName) == .orderedAscending
+            }
+        case .type: return filteredFiles.sorted { $0.fileType.displayName < $1.fileType.displayName }
+        }
     }
 
     private var selectedFiles: [RecoverableFile] {
@@ -29,7 +44,7 @@ struct ResultBrowserView: View {
             filterBar
             Divider()
             List {
-                ForEach(filteredFiles) { file in
+                ForEach(sortedFiles) { file in
                     rowView(file)
                 }
             }
@@ -90,6 +105,13 @@ struct ResultBrowserView: View {
             .pickerStyle(.menu)
             .frame(width: 200)
             .help("Filter recovered files by type (images, videos, documents, etc.)")
+
+            Picker("Sort", selection: $sortKey) {
+                ForEach(FileSortKey.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+            }
+            .pickerStyle(.menu)
+            .fixedSize()
+            .help("Sort the recovered files by size, name, or type")
 
             Spacer()
             Text("\(filteredFiles.count) shown · \(result.count) total · \(selection.count) selected")
