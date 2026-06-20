@@ -46,7 +46,20 @@ public enum FileTypeSniffer {
                                     fileType: sig.fileType, displayName: sig.displayName)
         }
 
-        // 2. ISO base media (MP4 / MOV / HEIC): the `ftyp` box at offset 4, brand at 8.
+        // 2. MPEG elementary stream (sequence header start code) — `.mpeg`. (The program-stream
+        //    pack header `00 00 01 BA` is already covered by the carver signature above.)
+        if bytes.count >= 4, bytes[0] == 0x00, bytes[1] == 0x00, bytes[2] == 0x01, bytes[3] == 0xB3 {
+            return DetectedFileType(fileExtension: "mpeg", fileType: .video, displayName: "MPEG video")
+        }
+
+        // 3. MPEG transport stream — the 0x47 sync byte repeats every 188 bytes. A single 0x47 is
+        //    far too common, so require it to line up across several packets.
+        if bytes.count >= 188 * 3 + 1,
+           bytes[0] == 0x47, bytes[188] == 0x47, bytes[376] == 0x47, bytes[564] == 0x47 {
+            return DetectedFileType(fileExtension: "ts", fileType: .video, displayName: "MPEG-TS video")
+        }
+
+        // 4. ISO base media (MP4 / MOV / HEIC): the `ftyp` box at offset 4, brand at 8.
         if bytes.count >= 12, Array(bytes[4..<8]) == Array("ftyp".utf8) {
             let brand = (String(bytes: bytes[8..<12], encoding: .ascii) ?? "")
                 .trimmingCharacters(in: .whitespaces).lowercased()
@@ -59,7 +72,7 @@ public enum FileTypeSniffer {
             return DetectedFileType(fileExtension: "mp4", fileType: .video, displayName: "MP4 video")
         }
 
-        // 3. Plain-text fallback: valid UTF-8 with very few control bytes.
+        // 5. Plain-text fallback: valid UTF-8 with very few control bytes.
         if looksLikeText(bytes) {
             return DetectedFileType(fileExtension: "txt", fileType: .text, displayName: "Plain text")
         }

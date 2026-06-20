@@ -24,6 +24,25 @@ struct FileTypeSnifferTests {
         #expect(FileTypeSniffer.detect(riff("ZZZZ")) == nil)
     }
 
+    @Test func detectsMatroskaAndMPEG() {
+        let mkv: [UInt8] = [0x1A, 0x45, 0xDF, 0xA3] + [UInt8](repeating: 0, count: 32)
+        #expect(FileTypeSniffer.detect(mkv)?.fileExtension == "mkv")
+        #expect(FileTypeSniffer.detect(mkv)?.fileType == .video)
+
+        // MPEG program stream: pack header + an MPEG-2 pack-id byte (0x44 = 01000100).
+        let mpegPS: [UInt8] = [0x00, 0x00, 0x01, 0xBA, 0x44] + [UInt8](repeating: 0, count: 32)
+        #expect(FileTypeSniffer.detect(mpegPS)?.fileExtension == "mpg")
+
+        // MPEG elementary stream: sequence-header start code.
+        let mpegES: [UInt8] = [0x00, 0x00, 0x01, 0xB3] + [UInt8](repeating: 0, count: 32)
+        #expect(FileTypeSniffer.detect(mpegES)?.fileExtension == "mpeg")
+
+        // MPEG-TS: 0x47 sync byte aligned across packets.
+        var ts = [UInt8](repeating: 0, count: 188 * 4 + 1)
+        for p in 0..<4 { ts[p * 188] = 0x47 }
+        #expect(FileTypeSniffer.detect(ts)?.fileExtension == "ts")
+    }
+
     @Test func detectsMP4ByFtypBox() {
         let mp4: [UInt8] = [0, 0, 0, 0x18] + Array("ftypisom".utf8) + [UInt8](repeating: 0, count: 16)
         let d = FileTypeSniffer.detect(mp4)

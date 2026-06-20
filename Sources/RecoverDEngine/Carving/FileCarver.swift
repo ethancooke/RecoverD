@@ -108,9 +108,31 @@ public struct SignatureFileCarver: FileCarver {
                           fileExtension: "mp3", fileType: .audio,
                           maxExpectedSize: 256 * 1024 * 1024,
                           headerFollowSet: [0x02, 0x03, 0x04],
-                          displayName: "MP3 audio")
+                          displayName: "MP3 audio"),
+            // Matroska / WebM: the EBML header magic. (Both use it; WebM is just a Matroska
+            // profile.) No simple total-size field, so it's size-capped.
+            FileSignature(magic: [0x1A, 0x45, 0xDF, 0xA3],
+                          fileExtension: "mkv", fileType: .video,
+                          maxExpectedSize: 4 * 1024 * 1024 * 1024,
+                          displayName: "Matroska/WebM video"),
+            // MPEG program stream (.mpg/.vob): pack-header start code, validated by the pack
+            // identifier bits in the next byte (MPEG-1 `0010xxxx`, MPEG-2 `01xxxxxx`) so the
+            // common `00 00 01` prefix doesn't carve garbage.
+            FileSignature(magic: [0x00, 0x00, 0x01, 0xBA],
+                          fileExtension: "mpg", fileType: .video,
+                          maxExpectedSize: 4 * 1024 * 1024 * 1024,
+                          headerFollowSet: SignatureFileCarver.mpegPackBytes,
+                          displayName: "MPEG video")
         ]
     }
+
+    /// Valid bytes immediately after an MPEG-PS pack-header start code: MPEG-2 packs are
+    /// `01xxxxxx` (0x40–0x7F), MPEG-1 packs are `0010xxxx` (0x20–0x2F).
+    static let mpegPackBytes: Set<UInt8> = {
+        var set = Set<UInt8>(0x40...0x7F)
+        set.formUnion(0x20...0x2F)
+        return set
+    }()
 
     /// The set of valid JPEG marker codes that may immediately follow `FF D8 FF`: APP0–APP15
     /// (`E0`–`EF`), DQT (`DB`), DHT (`C4`), DRI (`DD`), COM (`FE`), and the SOF variants

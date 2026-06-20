@@ -155,6 +155,32 @@ struct ScanEngineTests {
         await engine.clear()
     }
 
+    @Test("Deep scan carves Matroska (EBML) and MPEG-PS signatures as video")
+    func carveMatroskaAndMPEG() async throws {
+        let size = 200_000
+        var bytes = [UInt8](repeating: 0, count: size)
+        let mkvOffset = 20_000
+        bytes.replaceSubrange(mkvOffset..<mkvOffset + 4, with: [0x1A, 0x45, 0xDF, 0xA3])
+        let mpegOffset = 60_000
+        // pack-header start code + a valid MPEG-2 pack-id byte (0x44).
+        bytes.replaceSubrange(mpegOffset..<mpegOffset + 5, with: [0x00, 0x00, 0x01, 0xBA, 0x44])
+
+        let reader = InMemoryBlockReader(bytes)
+        let device = DeviceInfo(
+            id: DeviceID("t"), displayName: "t", bsdName: "x", devicePath: "/x", rawPath: "/x",
+            totalSize: Int64(size), blockSize: 512, isRemovable: true, isExternal: true
+        )
+        let engine = ScanEngine()
+        await engine.startScan(device: device, mode: .deep, reader: reader)
+        let stream = await engine.subscribeProgress()
+        for await update in stream where update.phase == .complete { break }
+        let files = await engine.snapshot().files
+
+        #expect(files.first { $0.byteOffset == Int64(mkvOffset) }?.fileType == .video)
+        #expect(files.first { $0.byteOffset == Int64(mpegOffset) }?.fileType == .video)
+        await engine.clear()
+    }
+
     @Test("Quick scan with unknown FS yields no files and still completes")
     func quickScanUnknownFS() async throws {
         let reader = InMemoryBlockReader([UInt8](repeating: 0, count: 4096))
