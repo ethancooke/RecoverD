@@ -54,7 +54,7 @@ struct VideoPreviewView: View {
             return
         }
 
-        let loader = InMemoryAssetLoader(contentReader: contentReader)
+        let loader = InMemoryAssetLoader(contentReader: contentReader, fileExtension: fileExtension)
         assetLoader = loader
         let asset = loader.makeAsset()
 

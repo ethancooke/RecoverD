@@ -400,7 +400,8 @@ final class RecoverySessionViewModel {
 
     private func generateVideoThumbnail(for file: RecoverableFile) async -> Bool {
         guard let contentReader = contentReader(for: file) else { return false }
-        let loader = InMemoryAssetLoader(contentReader: contentReader)
+        let ext = (file.displayName as NSString).pathExtension
+        let loader = InMemoryAssetLoader(contentReader: contentReader, fileExtension: ext)
         let asset = loader.makeAsset()
 
         do {

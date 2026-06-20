@@ -1,5 +1,6 @@
 import Foundation
 import AVFoundation
+import UniformTypeIdentifiers
 import RecoverDCore
 import RecoverDEngine
 
@@ -21,6 +22,10 @@ final class InMemoryAssetLoader: NSObject, AVAssetResourceLoaderDelegate, @unche
     static let scheme = "recoverd-inmemory"
 
     private let contentReader: FileContentReader
+    /// The UTI AVFoundation uses to pick a demuxer. Derived from the file's (real) extension — a
+    /// generic `public.data` leaves AVFoundation unable to recognize MP4/MOV/etc. and it won't play.
+    private let contentTypeUTI: String
+    private let fileExtension: String
     private let lock = NSLock()
     private var _pendingRequests: Set<ObjectIdentifier> = []
 
@@ -36,15 +41,22 @@ final class InMemoryAssetLoader: NSObject, AVAssetResourceLoaderDelegate, @unche
         lock.lock(); _pendingRequests.remove(ObjectIdentifier(request)); lock.unlock()
     }
 
-    init(contentReader: FileContentReader) {
+    init(contentReader: FileContentReader, fileExtension: String = "") {
         self.contentReader = contentReader
+        self.fileExtension = fileExtension.lowercased()
+        // Resolve the extension to a concrete UTI so AVFoundation knows the format. Fall back to
+        // generic data if the extension is unknown/empty.
+        self.contentTypeUTI = UTType(filenameExtension: fileExtension.lowercased())?.identifier
+            ?? UTType.data.identifier
         super.init()
     }
 
     /// Creates an `AVURLAsset` backed by this loader. The URL is synthetic — the scheme triggers
-    /// the resource loader delegate, so the host/path are just identifiers.
+    /// the resource loader delegate — but we keep the real extension on the path as an extra format
+    /// hint for AVFoundation.
     func makeAsset() -> AVURLAsset {
-        let url = URL(string: "\(InMemoryAssetLoader.scheme)://preview/\(UUID().uuidString)")!
+        let suffix = fileExtension.isEmpty ? "" : ".\(fileExtension)"
+        let url = URL(string: "\(InMemoryAssetLoader.scheme)://preview/\(UUID().uuidString)\(suffix)")!
         let asset = AVURLAsset(url: url)
         asset.resourceLoader.setDelegate(self, queue: .global(qos: .userInitiated))
         return asset
@@ -60,7 +72,7 @@ final class InMemoryAssetLoader: NSObject, AVAssetResourceLoaderDelegate, @unche
         if let info = loadingRequest.contentInformationRequest {
             info.contentLength = contentReader.totalSize
             info.isByteRangeAccessSupported = true
-            info.contentType = "public.data"
+            info.contentType = contentTypeUTI
             loadingRequest.finishLoading()
             return true
         }
