@@ -77,38 +77,43 @@ final class InMemoryAssetLoader: NSObject, AVAssetResourceLoaderDelegate, @unche
             return true
         }
 
-        // 2. Data request — read the requested byte range from the source.
+        // 2. Data request — stream the requested byte range from the source in small chunks.
+        //    Reading the whole `requestedLength` at once stalls playback, because AVPlayer's
+        //    "all data to end" request would pull the entire (possibly huge) file from a slow
+        //    source device before a single byte is delivered. Chunked responses start feeding
+        //    immediately and keep peak memory bounded.
         guard let dataRequest = loadingRequest.dataRequest else {
             loadingRequest.finishLoading(with: NSError(domain: InMemoryAssetLoader.scheme, code: -1,
                                                        userInfo: [NSLocalizedDescriptionKey: "No data request"]))
             return true
         }
 
-        let offset = dataRequest.requestedOffset
-        let length = dataRequest.requestedLength
-
         addPending(loadingRequest)
-
         let contentReader = self.contentReader
-        let loadingRequestRef = loadingRequest
+        let request = loadingRequest
 
-        Task {
-            let result = try? await contentReader.read(at: offset, count: length)
-            DispatchQueue.global(qos: .userInitiated).async {
-                self.removePending(loadingRequestRef)
-                guard !loadingRequestRef.isCancelled else { return }
-
-                if let result {
-                    result.withUnsafeBytes { buf in
-                        loadingRequestRef.dataRequest?.respond(with: Data(buf))
-                    }
-                    result.wipe()
-                    loadingRequestRef.finishLoading()
-                } else {
-                    loadingRequestRef.finishLoading(with: NSError(domain: InMemoryAssetLoader.scheme, code: -3,
-                                                               userInfo: [NSLocalizedDescriptionKey: "Read failed"]))
+        Task { [weak self] in
+            let chunkSize = 256 * 1024
+            let end = dataRequest.requestedOffset + Int64(dataRequest.requestedLength)
+            while !request.isCancelled {
+                let pos = dataRequest.currentOffset
+                guard pos < end else { break }
+                let want = Int(min(Int64(chunkSize), end - pos))
+                do {
+                    let data = try await contentReader.read(at: pos, count: want)
+                    if data.count == 0 { data.wipe(); break } // EOF
+                    data.withUnsafeBytes { dataRequest.respond(with: Data($0)) }
+                    let got = data.count
+                    data.wipe()
+                    if got < want { break } // short read → end of file
+                } catch {
+                    self?.removePending(request)
+                    if !request.isCancelled { request.finishLoading(with: error as NSError) }
+                    return
                 }
             }
+            self?.removePending(request)
+            if !request.isCancelled { request.finishLoading() }
         }
 
         return true
