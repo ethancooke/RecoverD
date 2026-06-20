@@ -13,6 +13,9 @@ public enum ContainerKind: Sendable, Hashable {
     /// TIFF and TIFF-based camera RAW (`II*\0` / `MM\0*`): the engine skips the copy embedded in
     /// JPEG EXIF and labels Canon CR2 (which has `CR` at offset 8) specifically.
     case tiff
+    /// Matroska/WebM (EBML): the size comes from the Segment element's size field, a variable-
+    /// length integer right after the Segment ID.
+    case ebml
 }
 
 /// A recognizable file signature (magic bytes) used for carving.
@@ -156,17 +159,18 @@ public struct SignatureFileCarver: FileCarver {
                           maxExpectedSize: 16 * 1024 * 1024 * 1024,
                           container: .isoBMFF, displayName: "MP4/MOV/M4A"),
             // Matroska / WebM: the EBML header magic. (Both use it; WebM is just a Matroska
-            // profile.) No simple total-size field, so it's size-capped.
+            // profile.) The engine parses the EBML Segment size for the real length.
             FileSignature(magic: [0x1A, 0x45, 0xDF, 0xA3],
                           fileExtension: "mkv", fileType: .video,
-                          maxExpectedSize: 4 * 1024 * 1024 * 1024,
-                          displayName: "Matroska/WebM video"),
+                          maxExpectedSize: 8 * 1024 * 1024 * 1024,
+                          container: .ebml, displayName: "Matroska/WebM video"),
             // MPEG program stream (.mpg/.vob): pack-header start code, validated by the pack
             // identifier bits in the next byte (MPEG-1 `0010xxxx`, MPEG-2 `01xxxxxx`) so the
-            // common `00 00 01` prefix doesn't carve garbage.
+            // common `00 00 01` prefix doesn't carve garbage. Bounded by the program end code.
             FileSignature(magic: [0x00, 0x00, 0x01, 0xBA],
                           fileExtension: "mpg", fileType: .video,
                           maxExpectedSize: 4 * 1024 * 1024 * 1024,
+                          footer: [0x00, 0x00, 0x01, 0xB9],
                           headerFollowSet: SignatureFileCarver.mpegPackBytes,
                           displayName: "MPEG video")
         ]

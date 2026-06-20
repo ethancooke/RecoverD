@@ -184,6 +184,11 @@ public actor ScanEngine {
             ?? (16 * 1024 * 1024 * 1024)
         let tiffMaxSize = carver.signatures.first { $0.container == .tiff }?.maxExpectedSize
             ?? (128 * 1024 * 1024)
+        let ebmlMaxSize = carver.signatures.first { $0.container == .ebml }?.maxExpectedSize
+            ?? (8 * 1024 * 1024 * 1024)
+        // MPEG program-stream pack headers recur at every pack, not just the file start, so once a
+        // stream is carved we skip pack hits inside its extent.
+        var mpegConsumedUntil: Int64 = 0
 
         while offset < total {
             try Task.checkCancellation()
@@ -202,14 +207,15 @@ public actor ScanEngine {
             // We can't resolve footer-bounded sizes here because that needs async reads, so we
             // gather the validated offsets and size them after the buffer access closes.
             let base = offset
-            let (hits, riffFiles, isoHits, tiffHits):
+            let (hits, riffFiles, isoHits, tiffHits, ebmlHits):
                 ([(signature: FileSignature, offset: Int64)], [RecoverableFile],
-                 [(start: Int64, brand: String)], [(start: Int64, ext: String, name: String)]) =
+                 [(start: Int64, brand: String)], [(start: Int64, ext: String, name: String)], [Int64]) =
             chunk.withUnsafeBytes { buf in
                 var found: [(FileSignature, Int64)] = []
                 var riff: [RecoverableFile] = []
                 var iso: [(start: Int64, brand: String)] = []
                 var tiff: [(start: Int64, ext: String, name: String)] = []
+                var ebml: [Int64] = []
                 for signature in carver.signatures {
                     var cursor = 0
                     while cursor < buf.count {
@@ -270,6 +276,13 @@ public actor ScanEngine {
                             continue
                         }
 
+                        // Matroska/WebM (EBML): the Segment size is parsed in the async pass below.
+                        if signature.container == .ebml {
+                            guard seenOffsets.insert(absolute).inserted else { continue }
+                            ebml.append(absolute)
+                            continue
+                        }
+
                         // Validate the byte after the magic when the signature demands it. If the
                         // magic lands at the very end of the chunk the follow byte isn't available
                         // yet — skip without recording it so the next (overlapping) chunk retries.
@@ -283,7 +296,7 @@ public actor ScanEngine {
                         }
                     }
                 }
-                return (found, riff, iso, tiff)
+                return (found, riff, iso, tiff, ebml)
             }
             chunk.wipe()
 
@@ -307,6 +320,18 @@ public actor ScanEngine {
                 progress.filesFound = files.count
             }
 
+            // Matroska/WebM: read the Segment size for the real length; reject non-EBML noise.
+            for start in ebmlHits {
+                let cap = min(ebmlMaxSize, total - start)
+                let (size, valid) = try await resolveEBMLSize(start: start, cap: cap, reader: reader)
+                guard valid else { continue }
+                files.append(carver.makeContainerFile(
+                    fileExtension: "mkv", fileType: .video, displayName: "Matroska/WebM video",
+                    offset: start, size: size, confidence: 0.8, deviceID: device.id
+                ))
+                progress.filesFound = files.count
+            }
+
             // ISO-BMFF: walk the box chain to size each hit, then record it.
             for hit in isoHits {
                 let cap = min(isoMaxSize, total - hit.start)
@@ -323,9 +348,15 @@ public actor ScanEngine {
 
             // Second pass: resolve each hit's real size by locating its footer, then record it.
             for hit in hits {
+                let isMPEGPack = hit.signature.fileExtension == "mpg"
+                // Skip pack headers that fall inside an already-carved MPEG stream.
+                if isMPEGPack, hit.offset < mpegConsumedUntil { continue }
+
                 let (size, footerFound) = try await resolveCarvedSize(
                     signature: hit.signature, start: hit.offset, total: total, reader: reader
                 )
+                if isMPEGPack { mpegConsumedUntil = hit.offset + size }
+
                 files.append(carver.makeFile(
                     signature: hit.signature,
                     offset: hit.offset,
@@ -379,6 +410,51 @@ public actor ScanEngine {
             return (min(end - start, capped), true)
         }
         return (capped, false)
+    }
+
+    /// Sizes a Matroska/WebM file from its EBML structure: skip the EBML header element, then read
+    /// the Segment element's size (a variable-length integer after the `18 53 80 67` ID). Returns
+    /// `valid == false` for a non-EBML match (no Segment where expected) so noise is rejected; a
+    /// Segment with an unknown (streaming) size falls back to the cap.
+    private func resolveEBMLSize(start: Int64, cap: Int64, reader: any RawBlockReader) async throws
+        -> (size: Int64, valid: Bool) {
+        // Decode an EBML variable-length integer at `a[i]`: the leading-zero count of the first
+        // byte gives the length; the value is the remaining bits. Returns (value, length); a value
+        // of nil means "unknown size" (all data bits set).
+        func vint(_ a: [UInt8], _ i: Int) -> (value: Int64?, length: Int)? {
+            guard i < a.count, a[i] != 0 else { return nil }
+            var mask: UInt8 = 0x80, length = 1
+            while mask != 0, a[i] & mask == 0 { mask >>= 1; length += 1 }
+            guard length <= 8, i + length <= a.count else { return nil }
+            var value = Int64(a[i] & (mask &- 1)) // strip the length-marker bit
+            var allOnes = (a[i] & (mask &- 1)) == (mask &- 1)
+            for k in 1..<length {
+                value = (value << 8) | Int64(a[i + k])
+                if a[i + k] != 0xFF { allOnes = false }
+            }
+            return (allOnes ? nil : value, length)
+        }
+
+        func bytes(_ at: Int64, _ n: Int) async throws -> [UInt8] {
+            let d = try await reader.read(at: at, count: n)
+            defer { d.wipe() }
+            return d.withUnsafeBytes { Array($0) }
+        }
+
+        // EBML header element: ID (4 bytes: 1A 45 DF A3) + size VINT + data.
+        let head = try await bytes(start, 16)
+        guard head.count >= 6, head[0] == 0x1A, head[1] == 0x45, head[2] == 0xDF, head[3] == 0xA3,
+              let hsize = vint(head, 4), let headerData = hsize.value else { return (cap, false) }
+        let segPos = start + 4 + Int64(hsize.length) + headerData
+        guard segPos >= start, segPos < start + cap else { return (cap, false) }
+
+        // Segment element: ID (4 bytes: 18 53 80 67) + size VINT + content.
+        let seg = try await bytes(segPos, 16)
+        guard seg.count >= 6, seg[0] == 0x18, seg[1] == 0x53, seg[2] == 0x80, seg[3] == 0x67,
+              let ssize = vint(seg, 4) else { return (cap, false) }
+        guard let segContent = ssize.value else { return (cap, true) } // unknown/streaming → cap
+        let total = (segPos - start) + 4 + Int64(ssize.length) + segContent
+        return (min(max(total, 8), cap), true)
     }
 
     /// Scans for the outer JPEG `FF D9`, counting nested `FF D8 … FF D9` pairs (EXIF thumbnails)

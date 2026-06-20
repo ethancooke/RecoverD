@@ -202,15 +202,25 @@ struct ScanEngineTests {
         await engine.clear()
     }
 
-    @Test("Deep scan carves Matroska (EBML) and MPEG-PS signatures as video")
+    @Test("Matroska sizes from the Segment; MPEG packs collapse to one stream")
     func carveMatroskaAndMPEG() async throws {
         let size = 200_000
         var bytes = [UInt8](repeating: 0, count: size)
+
+        // Minimal valid Matroska: EBML header (4-byte data) + Segment with a 100-byte content.
         let mkvOffset = 20_000
-        bytes.replaceSubrange(mkvOffset..<mkvOffset + 4, with: [0x1A, 0x45, 0xDF, 0xA3])
+        bytes.replaceSubrange(mkvOffset..<mkvOffset + 9,
+            with: [0x1A, 0x45, 0xDF, 0xA3, 0x84, 0, 0, 0, 0])        // header: size VINT 0x84 ⇒ 4
+        bytes.replaceSubrange(mkvOffset + 9..<mkvOffset + 14,
+            with: [0x18, 0x53, 0x80, 0x67, 0xE4])                    // Segment, size VINT 0xE4 ⇒ 100
+        let mkvLen = 9 + 5 + 100                                     // header + seg id+size + content
+
+        // Three MPEG pack headers in a row (as in a real stream) — only the first should carve.
         let mpegOffset = 60_000
-        // pack-header start code + a valid MPEG-2 pack-id byte (0x44).
-        bytes.replaceSubrange(mpegOffset..<mpegOffset + 5, with: [0x00, 0x00, 0x01, 0xBA, 0x44])
+        for k in 0..<3 {
+            bytes.replaceSubrange(mpegOffset + k * 2048..<mpegOffset + k * 2048 + 5,
+                with: [0x00, 0x00, 0x01, 0xBA, 0x44])
+        }
 
         let reader = InMemoryBlockReader(bytes)
         let device = DeviceInfo(
@@ -223,8 +233,14 @@ struct ScanEngineTests {
         for await update in stream where update.phase == .complete { break }
         let files = await engine.snapshot().files
 
-        #expect(files.first { $0.byteOffset == Int64(mkvOffset) }?.fileType == .video)
-        #expect(files.first { $0.byteOffset == Int64(mpegOffset) }?.fileType == .video)
+        let mkv = try #require(files.first { $0.byteOffset == Int64(mkvOffset) })
+        #expect(mkv.fileType == .video)
+        #expect(mkv.size == Int64(mkvLen)) // sized from the EBML Segment, not the cap
+
+        // The three pack headers belong to one stream → exactly one MPEG file.
+        let mpegFiles = files.filter { $0.signatureMatch == "MPEG video" }
+        #expect(mpegFiles.count == 1)
+        #expect(mpegFiles.first?.byteOffset == Int64(mpegOffset))
         await engine.clear()
     }
 
