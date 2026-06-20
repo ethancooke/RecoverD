@@ -59,20 +59,12 @@ public enum FileTypeSniffer {
             return DetectedFileType(fileExtension: "ts", fileType: .video, displayName: "MPEG-TS video")
         }
 
-        // 4. ISO base media (MP4 / MOV / HEIC): the `ftyp` box at offset 4, brand at 8.
+        // 4. ISO base media (MP4 / MOV / M4A / HEIC): the `ftyp` box at offset 4, brand at 8.
         if bytes.count >= 12, Array(bytes[4..<8]) == Array("ftyp".utf8) {
-            let brand = (String(bytes: bytes[8..<12], encoding: .ascii) ?? "")
-                .trimmingCharacters(in: .whitespaces).lowercased()
-            if brand.hasPrefix("hei") || brand == "mif1" || brand == "heix" {
-                return DetectedFileType(fileExtension: "heic", fileType: .image, displayName: "HEIF image")
-            }
-            if brand.hasPrefix("m4a") || brand.hasPrefix("m4b") || brand.hasPrefix("m4p") {
-                return DetectedFileType(fileExtension: "m4a", fileType: .audio, displayName: "MPEG-4 audio")
-            }
-            if brand.hasPrefix("qt") {
-                return DetectedFileType(fileExtension: "mov", fileType: .video, displayName: "QuickTime video")
-            }
-            return DetectedFileType(fileExtension: "mp4", fileType: .video, displayName: "MP4 video")
+            let brand = String(bytes: bytes[8..<12], encoding: .ascii) ?? ""
+            let form = SignatureFileCarver.isoBMFFType(brand: brand)
+            return DetectedFileType(fileExtension: form.fileExtension,
+                                    fileType: form.fileType, displayName: form.displayName)
         }
 
         // 5. Raw MPEG audio (an MP3 with no ID3 tag): a valid frame header at the start. Validating

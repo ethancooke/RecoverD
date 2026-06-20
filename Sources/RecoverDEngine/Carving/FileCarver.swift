@@ -7,6 +7,9 @@ public enum ContainerKind: Sendable, Hashable {
     /// RIFF (`RIFF` magic): bytes 4–7 are the little-endian payload size; bytes 8–11 are the form
     /// type (`AVI `, `WAVE`, `WEBP`, …).
     case riff
+    /// ISO base media (MP4/MOV/M4A/HEIC): the `ftyp` magic sits 4 bytes into the file; the size
+    /// comes from walking the top-level box chain. The brand (bytes 8–11) gives the real type.
+    case isoBMFF
 }
 
 /// A recognizable file signature (magic bytes) used for carving.
@@ -117,6 +120,12 @@ public struct SignatureFileCarver: FileCarver {
             FileSignature(magic: [0x4F, 0x67, 0x67, 0x53],
                           fileExtension: "ogg", fileType: .audio,
                           maxExpectedSize: 1024 * 1024 * 1024, displayName: "Ogg audio"),
+            // ISO base media (MP4/MOV/M4A/HEIC): the `ftyp` box type, which is 4 bytes into the
+            // file. The engine backs up to the box start and walks the box chain to size it.
+            FileSignature(magic: [0x66, 0x74, 0x79, 0x70],
+                          fileExtension: "mp4", fileType: .video,
+                          maxExpectedSize: 16 * 1024 * 1024 * 1024,
+                          container: .isoBMFF, displayName: "MP4/MOV/M4A"),
             // Matroska / WebM: the EBML header magic. (Both use it; WebM is just a Matroska
             // profile.) No simple total-size field, so it's size-capped.
             FileSignature(magic: [0x1A, 0x45, 0xDF, 0xA3],
@@ -194,24 +203,42 @@ public struct SignatureFileCarver: FileCarver {
         }
     }
 
-    /// Builds a `RecoverableFile` for a parsed container (RIFF) hit, using the form's real
+    /// Maps an ISO-BMFF major brand (the `ftyp` box's bytes 8–11) to a media type. Shared by the
+    /// carver and `FileTypeSniffer`. Unknown-but-plausible brands fall back to MP4 video.
+    public static func isoBMFFType(brand: String) -> RIFFForm {
+        let b = brand.trimmingCharacters(in: .whitespaces).lowercased()
+        if b.hasPrefix("m4a") || b.hasPrefix("m4b") || b.hasPrefix("m4p") {
+            return RIFFForm(fileExtension: "m4a", fileType: .audio, displayName: "MPEG-4 audio")
+        }
+        if b.hasPrefix("hei") || b == "mif1" || b == "msf1" || b == "avif" {
+            return RIFFForm(fileExtension: "heic", fileType: .image, displayName: "HEIF image")
+        }
+        if b.hasPrefix("qt") {
+            return RIFFForm(fileExtension: "mov", fileType: .video, displayName: "QuickTime video")
+        }
+        return RIFFForm(fileExtension: "mp4", fileType: .video, displayName: "MP4 video")
+    }
+
+    /// Builds a `RecoverableFile` for a parsed container (RIFF/ISO-BMFF) hit, using the resolved
     /// extension/type and the header-derived size.
-    public func makeContainerFile(form: RIFFForm,
+    public func makeContainerFile(fileExtension: String,
+                                  fileType: RecoverableFileType,
+                                  displayName: String,
                                   offset: Int64,
                                   size: Int64,
                                   deviceID: DeviceID) -> RecoverableFile {
         RecoverableFile(
-            id: FileID("carved:\(offset):\(form.fileExtension)"),
-            displayName: "recovered_\(offset).\(form.fileExtension)",
+            id: FileID("carved:\(offset):\(fileExtension)"),
+            displayName: "recovered_\(offset).\(fileExtension)",
             originalPath: nil,
-            fileType: form.fileType,
+            fileType: fileType,
             size: max(0, size),
             byteOffset: offset,
             allocationStatus: .orphaned,
             sourceDeviceID: deviceID,
-            // Valid form type + self-describing size ⇒ high confidence it's a real file.
+            // Valid container header + derived size ⇒ high confidence it's a real file.
             confidence: 0.85,
-            signatureMatch: form.displayName
+            signatureMatch: displayName
         )
     }
 }

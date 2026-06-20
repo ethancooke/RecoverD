@@ -179,6 +179,9 @@ public actor ScanEngine {
         let overlap = 64
         var offset: Int64 = 0
         var seenOffsets: Set<Int64> = []
+        // Size cap for the ISO-BMFF box walk (falls back if the signature is ever removed).
+        let isoMaxSize = carver.signatures.first { $0.container == .isoBMFF }?.maxExpectedSize
+            ?? (16 * 1024 * 1024 * 1024)
 
         while offset < total {
             try Task.checkCancellation()
@@ -197,10 +200,12 @@ public actor ScanEngine {
             // We can't resolve footer-bounded sizes here because that needs async reads, so we
             // gather the validated offsets and size them after the buffer access closes.
             let base = offset
-            let (hits, riffFiles): ([(signature: FileSignature, offset: Int64)], [RecoverableFile]) =
+            let (hits, riffFiles, isoHits):
+                ([(signature: FileSignature, offset: Int64)], [RecoverableFile], [(start: Int64, brand: String)]) =
             chunk.withUnsafeBytes { buf in
                 var found: [(FileSignature, Int64)] = []
                 var riff: [RecoverableFile] = []
+                var iso: [(start: Int64, brand: String)] = []
                 for signature in carver.signatures {
                     var cursor = 0
                     while cursor < buf.count {
@@ -224,6 +229,23 @@ public actor ScanEngine {
                             continue
                         }
 
+                        // ISO-BMFF (MP4/MOV/M4A/HEIC): `ftyp` is 4 bytes into the file, so back up to
+                        // the box start. Validate the box size + a printable brand to reject random
+                        // "ftyp" bytes; the box chain is walked for the size in the async pass below.
+                        if signature.container == .isoBMFF {
+                            guard rel >= 4, rel + 8 <= buf.count else { continue }
+                            let start = absolute - 4
+                            guard seenOffsets.insert(start).inserted else { continue }
+                            let boxSize = (UInt32(buf[rel - 4]) << 24) | (UInt32(buf[rel - 3]) << 16)
+                                | (UInt32(buf[rel - 2]) << 8) | UInt32(buf[rel - 1])
+                            guard boxSize >= 12, boxSize <= 4096 else { continue }
+                            let brandBytes = [buf[rel + 4], buf[rel + 5], buf[rel + 6], buf[rel + 7]]
+                            guard brandBytes.allSatisfy({ $0 >= 0x20 && $0 <= 0x7E }),
+                                  let brand = String(bytes: brandBytes, encoding: .ascii) else { continue }
+                            iso.append((start, brand))
+                            continue
+                        }
+
                         // Validate the byte after the magic when the signature demands it. If the
                         // magic lands at the very end of the chunk the follow byte isn't available
                         // yet — skip without recording it so the next (overlapping) chunk retries.
@@ -237,12 +259,24 @@ public actor ScanEngine {
                         }
                     }
                 }
-                return (found, riff)
+                return (found, riff, iso)
             }
             chunk.wipe()
 
             for file in riffFiles {
                 files.append(file)
+                progress.filesFound = files.count
+            }
+
+            // ISO-BMFF: walk the box chain to size each hit, then record it.
+            for hit in isoHits {
+                let cap = min(isoMaxSize, total - hit.start)
+                let size = try await walkISOBMFFSize(start: hit.start, cap: cap, reader: reader)
+                let form = SignatureFileCarver.isoBMFFType(brand: hit.brand)
+                files.append(carver.makeContainerFile(
+                    fileExtension: form.fileExtension, fileType: form.fileType,
+                    displayName: form.displayName, offset: hit.start, size: size, deviceID: device.id
+                ))
                 progress.filesFound = files.count
             }
 
@@ -342,6 +376,39 @@ public actor ScanEngine {
         return nil
     }
 
+    /// Walks the top-level ISO-BMFF box chain from `start`, summing box sizes until it meets a
+    /// 4-byte type that isn't a known box (the end of the file) or hits the size `cap`. Each step
+    /// reads only a 16-byte box header and jumps over the (possibly huge) payload, so it's a few
+    /// small reads per file. Returns the file length.
+    private func walkISOBMFFSize(start: Int64, cap: Int64, reader: any RawBlockReader) async throws -> Int64 {
+        let known: Set<String> = ["ftyp", "moov", "mdat", "free", "skip", "wide", "uuid", "meta",
+                                  "mfra", "moof", "sidx", "styp", "pdin", "pnot", "udta"]
+        let limit = start + cap
+        var pos = start
+        while pos < limit {
+            let header = try await reader.read(at: pos, count: 16)
+            if header.count < 8 { header.wipe(); break }
+            let boxSize: Int64? = header.withUnsafeBytes { buf -> Int64? in
+                let size32 = (UInt32(buf[0]) << 24) | (UInt32(buf[1]) << 16)
+                    | (UInt32(buf[2]) << 8) | UInt32(buf[3])
+                let type = String(bytes: [buf[4], buf[5], buf[6], buf[7]], encoding: .ascii) ?? ""
+                guard known.contains(type) else { return nil } // not a box → end of file
+                if size32 == 1 {
+                    guard buf.count >= 16 else { return nil }
+                    var large: UInt64 = 0
+                    for i in 8..<16 { large = (large << 8) | UInt64(buf[i]) }
+                    return Int64(bitPattern: large)
+                }
+                if size32 == 0 { return limit - pos } // box runs to EOF
+                return Int64(size32)
+            }
+            header.wipe()
+            guard let size = boxSize, size >= 8 else { break }
+            pos += size
+        }
+        return min(max(pos - start, 0), cap)
+    }
+
     /// Scans forward for the first occurrence of `footer`, returning the absolute offset just past
     /// it, or nil if not found within `limit`. Used for unique terminal markers (PNG IEND, %%EOF).
     private func findFirstFooter(
@@ -381,7 +448,9 @@ private func parseRIFFFile(in buf: UnsafeRawBufferPointer, at rel: Int, absolute
     let cap = min(signature.maxExpectedSize, total - absolute)
     let size = (declared >= 16 && declared <= cap) ? declared : cap
 
-    return carver.makeContainerFile(form: form, offset: absolute, size: size, deviceID: deviceID)
+    return carver.makeContainerFile(fileExtension: form.fileExtension, fileType: form.fileType,
+                                    displayName: form.displayName, offset: absolute, size: size,
+                                    deviceID: deviceID)
 }
 
 private func findMagic(in buf: UnsafeRawBufferPointer, magic: [UInt8], from start: Int) -> Int? {

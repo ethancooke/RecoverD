@@ -181,6 +181,53 @@ struct ScanEngineTests {
         await engine.clear()
     }
 
+    @Test("Deep scan carves ISO-BMFF: backs up to box start, walks boxes for size, types by brand")
+    func carveISOBMFF() async throws {
+        let size = 200_000
+        var bytes = [UInt8](repeating: 0, count: size)
+
+        func writeBE32(_ offset: Int, _ value: UInt32) {
+            bytes[offset] = UInt8((value >> 24) & 0xFF)
+            bytes[offset + 1] = UInt8((value >> 16) & 0xFF)
+            bytes[offset + 2] = UInt8((value >> 8) & 0xFF)
+            bytes[offset + 3] = UInt8(value & 0xFF)
+        }
+        func writeASCII(_ offset: Int, _ s: String) {
+            bytes.replaceSubrange(offset..<offset + s.utf8.count, with: Array(s.utf8))
+        }
+        // An ISO-BMFF file: ftyp(24) + free(16) + mdat(100) = 140 bytes total.
+        func writeISO(at o: Int, brand: String) -> Int {
+            writeBE32(o, 24);       writeASCII(o + 4, "ftyp"); writeASCII(o + 8, brand)
+            writeBE32(o + 24, 16);  writeASCII(o + 28, "free")
+            writeBE32(o + 40, 100); writeASCII(o + 44, "mdat")
+            return 140
+        }
+        let mp4Offset = 20_000, mp4Len = writeISO(at: mp4Offset, brand: "isom")
+        let m4aOffset = 60_000, m4aLen = writeISO(at: m4aOffset, brand: "M4A ")
+
+        let reader = InMemoryBlockReader(bytes)
+        let device = DeviceInfo(
+            id: DeviceID("t"), displayName: "t", bsdName: "x", devicePath: "/x", rawPath: "/x",
+            totalSize: Int64(size), blockSize: 512, isRemovable: true, isExternal: true
+        )
+        let engine = ScanEngine()
+        await engine.startScan(device: device, mode: .deep, reader: reader)
+        let stream = await engine.subscribeProgress()
+        for await update in stream where update.phase == .complete { break }
+        let files = await engine.snapshot().files
+
+        // The carve starts at the box (4 bytes before `ftyp`), is sized by the box walk, and the
+        // brand picks the type: isom → video, M4A → audio.
+        let mp4 = try #require(files.first { $0.byteOffset == Int64(mp4Offset) })
+        #expect(mp4.fileType == .video)
+        #expect(mp4.size == Int64(mp4Len))
+
+        let m4a = try #require(files.first { $0.byteOffset == Int64(m4aOffset) })
+        #expect(m4a.fileType == .audio)
+        #expect(m4a.size == Int64(m4aLen))
+        await engine.clear()
+    }
+
     @Test("Quick scan with unknown FS yields no files and still completes")
     func quickScanUnknownFS() async throws {
         let reader = InMemoryBlockReader([UInt8](repeating: 0, count: 4096))
