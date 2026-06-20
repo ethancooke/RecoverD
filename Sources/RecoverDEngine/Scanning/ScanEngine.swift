@@ -175,9 +175,16 @@ public actor ScanEngine {
     private func carve(device: DeviceInfo, baseReader: any RawBlockReader) async throws {
         let carver = SignatureFileCarver()
         // Shared cache so the sequential scan and the forward-reading size resolvers don't fetch
-        // the same regions off the device twice.
-        let reader = await CachingBlockReader(baseReader)
-        defer { Task { await reader.purge() } }
+        // the same regions off the device twice. If the caller already passed a session cache
+        // (so previews can reuse the scan's reads), use it; otherwise make a carve-local one.
+        let reader: any RawBlockReader
+        let ownsCache: Bool
+        if let session = baseReader as? CachingBlockReader {
+            reader = session; ownsCache = false
+        } else {
+            reader = await CachingBlockReader(baseReader); ownsCache = true
+        }
+        defer { if ownsCache, let c = reader as? CachingBlockReader { Task { await c.purge() } } }
         let total = await reader.totalSize
         let chunkSize = 4 * 1024 * 1024
         let overlap = 64
@@ -190,6 +197,8 @@ public actor ScanEngine {
             ?? (128 * 1024 * 1024)
         let ebmlMaxSize = carver.signatures.first { $0.container == .ebml }?.maxExpectedSize
             ?? (8 * 1024 * 1024 * 1024)
+        let rafMaxSize = carver.signatures.first { $0.container == .raf }?.maxExpectedSize
+            ?? (256 * 1024 * 1024)
         // MPEG program-stream pack headers recur at every pack, not just the file start, so once a
         // stream is carved we skip pack hits inside its extent.
         var mpegConsumedUntil: Int64 = 0
@@ -232,15 +241,16 @@ public actor ScanEngine {
             // We can't resolve footer-bounded sizes here because that needs async reads, so we
             // gather the validated offsets and size them after the buffer access closes.
             let base = offset
-            let (hits, riffFiles, isoHits, tiffHits, ebmlHits):
+            let (hits, riffFiles, isoHits, tiffHits, ebmlHits, rafHits):
                 ([(signature: FileSignature, offset: Int64)], [RecoverableFile],
-                 [(start: Int64, brand: String)], [(start: Int64, ext: String, name: String)], [Int64]) =
+                 [(start: Int64, brand: String)], [(start: Int64, ext: String, name: String)], [Int64], [Int64]) =
             chunk.withUnsafeBytes { buf in
                 var found: [(FileSignature, Int64)] = []
                 var riff: [RecoverableFile] = []
                 var iso: [(start: Int64, brand: String)] = []
                 var tiff: [(start: Int64, ext: String, name: String)] = []
                 var ebml: [Int64] = []
+                var raf: [Int64] = []
                 var i = 0
                 while i < buf.count {
                     let candidates = signaturesByFirstByte[Int(buf[i])]
@@ -312,6 +322,13 @@ public actor ScanEngine {
                             continue
                         }
 
+                        // Fujifilm RAF: the header directory is parsed for the size below.
+                        if signature.container == .raf {
+                            guard seenOffsets.insert(absolute).inserted else { continue }
+                            raf.append(absolute)
+                            continue
+                        }
+
                         // Validate the byte after the magic when the signature demands it. If the
                         // magic lands at the very end of the chunk the follow byte isn't available
                         // yet — skip without recording it so the next (overlapping) chunk retries.
@@ -326,7 +343,7 @@ public actor ScanEngine {
                     } // candidates
                     i += 1
                 } // buffer scan
-                return (found, riff, iso, tiff, ebml)
+                return (found, riff, iso, tiff, ebml, raf)
             }
             chunk.wipe()
 
@@ -357,6 +374,17 @@ public actor ScanEngine {
                 guard valid else { continue }
                 files.append(carver.makeContainerFile(
                     fileExtension: "mkv", fileType: .video, displayName: "Matroska/WebM video",
+                    offset: start, size: size, confidence: 0.8, deviceID: device.id
+                ))
+                progress.filesFound = files.count
+            }
+
+            // Fujifilm RAF: read the header directory for the real size.
+            for start in rafHits {
+                let cap = min(rafMaxSize, total - start)
+                let size = try await resolveRAFSize(start: start, cap: cap, reader: reader)
+                files.append(carver.makeContainerFile(
+                    fileExtension: "raf", fileType: .image, displayName: "Fujifilm RAW",
                     offset: start, size: size, confidence: 0.8, deviceID: device.id
                 ))
                 progress.filesFound = files.count
@@ -437,6 +465,28 @@ public actor ScanEngine {
             return (min(end - start, capped), true)
         }
         return (capped, false)
+    }
+
+    /// Sizes a Fujifilm RAF from its header directory: three big-endian (offset, length) pairs at
+    /// fixed positions point to the embedded JPEG, the CFA header, and the raw CFA data. The file
+    /// ends at the furthest of those. Falls back to the cap if the directory looks implausible.
+    private func resolveRAFSize(start: Int64, cap: Int64, reader: any RawBlockReader) async throws -> Int64 {
+        let header = try await reader.read(at: start, count: 108)
+        defer { header.wipe() }
+        let end: Int64? = header.withUnsafeBytes { buf -> Int64? in
+            guard buf.count >= 108 else { return nil }
+            func be32(_ i: Int) -> Int64 {
+                Int64(buf[i]) << 24 | Int64(buf[i + 1]) << 16 | Int64(buf[i + 2]) << 8 | Int64(buf[i + 3])
+            }
+            // (offset, length) at 0x54/0x58 (JPEG), 0x5C/0x60 (CFA header), 0x64/0x68 (CFA data).
+            var furthest: Int64 = 0
+            for (off, len) in [(0x54, 0x58), (0x5C, 0x60), (0x64, 0x68)] {
+                let o = be32(off), l = be32(len)
+                if o > 0, l > 0, o + l <= cap { furthest = max(furthest, o + l) }
+            }
+            return furthest > 0 ? furthest : nil
+        }
+        return end ?? cap
     }
 
     /// Sizes a Matroska/WebM file from its EBML structure: skip the EBML header element, then read

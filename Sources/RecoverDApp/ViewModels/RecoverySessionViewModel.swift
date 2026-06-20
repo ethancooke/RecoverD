@@ -55,6 +55,7 @@ final class RecoverySessionViewModel {
     let engine = ScanEngine()
     private var reader: (any RawBlockReader)?
     private var rawReader: RawFDReader?
+    private var sessionCache: CachingBlockReader?
     private var progressTask: Task<Void, Never>?
     private var devicePollTask: Task<Void, Never>?
 
@@ -162,14 +163,19 @@ final class RecoverySessionViewModel {
         }
     }
 
-    /// Opens an authorized, read-only fd to `/dev/r{bsdName}` and wraps it in a `RawFDReader`.
-    /// Closes any previously opened raw reader first.
-    private func openRawReader(bsdName: String, size: Int64, blockSize: Int) async throws -> RawFDReader {
+    /// Opens an authorized, read-only fd to `/dev/r{bsdName}`, wraps it in a `RawFDReader`, and
+    /// then a session-level `CachingBlockReader`. The cache is shared by the scan and by previews/
+    /// export, so previewing a just-scanned file reuses bytes already read instead of hitting the
+    /// (slow) device again. Closes any previously opened reader first.
+    private func openRawReader(bsdName: String, size: Int64, blockSize: Int) async throws -> any RawBlockReader {
+        await sessionCache?.purge()
         await rawReader?.close()
         let fd = try await PrivilegedRawDevice.openReadOnly(rawPath: "/dev/r\(bsdName)")
-        let reader = RawFDReader(fd: fd, totalSize: size, blockSize: blockSize)
-        rawReader = reader
-        return reader
+        let raw = RawFDReader(fd: fd, totalSize: size, blockSize: blockSize)
+        rawReader = raw
+        let cache = await CachingBlockReader(raw)
+        sessionCache = cache
+        return cache
     }
 
     /// Scans a mounted volume: enumerates live files via the filesystem, then reads the raw
@@ -324,7 +330,9 @@ final class RecoverySessionViewModel {
         progress = ScanProgress()
         lastError = nil
         await engine.clear()
+        await sessionCache?.purge()
         await rawReader?.close()
+        sessionCache = nil
         rawReader = nil
         reader = nil
     }
@@ -528,12 +536,15 @@ final class RecoverySessionViewModel {
 
         let engine = self.engine
         let rawReader = self.rawReader
+        let sessionCache = self.sessionCache
         self.rawReader = nil
+        self.sessionCache = nil
         self.reader = nil
 
         let done = DispatchSemaphore(value: 0)
         Task.detached {
             await engine.clear()
+            await sessionCache?.purge()
             await rawReader?.close()
             done.signal()
         }

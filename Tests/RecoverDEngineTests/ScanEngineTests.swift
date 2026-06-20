@@ -109,6 +109,37 @@ struct ScanEngineTests {
         await engine.clear()
     }
 
+    @Test("Fujifilm RAF is sized from its header directory, not the cap")
+    func carveRAFFromDirectory() async throws {
+        let size = 200_000
+        var bytes = [UInt8](repeating: 0, count: size)
+        let off = 10_000
+        bytes.replaceSubrange(off..<off + 8, with: Array("FUJIFILM".utf8))
+        func be32(_ at: Int, _ v: Int) {
+            bytes[at] = UInt8((v >> 24) & 0xFF); bytes[at + 1] = UInt8((v >> 16) & 0xFF)
+            bytes[at + 2] = UInt8((v >> 8) & 0xFF); bytes[at + 3] = UInt8(v & 0xFF)
+        }
+        // JPEG at 200 len 500; CFA header at 700 len 100; CFA data at 800 len 40_000 (the end).
+        be32(off + 0x54, 200);  be32(off + 0x58, 500)
+        be32(off + 0x5C, 700);  be32(off + 0x60, 100)
+        be32(off + 0x64, 800);  be32(off + 0x68, 40_000)
+        let expected = 800 + 40_000
+
+        let reader = InMemoryBlockReader(bytes)
+        let device = DeviceInfo(
+            id: DeviceID("t"), displayName: "t", bsdName: "x", devicePath: "/x", rawPath: "/x",
+            totalSize: Int64(size), blockSize: 512, isRemovable: true, isExternal: true
+        )
+        let engine = ScanEngine()
+        await engine.startScan(device: device, mode: .deep, reader: reader)
+        let stream = await engine.subscribeProgress()
+        for await update in stream where update.phase == .complete { break }
+        let raf = try #require(await engine.snapshot().files.first { $0.byteOffset == Int64(off) })
+        #expect(raf.fileType == .image)
+        #expect(raf.size == Int64(expected)) // furthest offset+length, not the 256 MB cap
+        await engine.clear()
+    }
+
     @Test("RIFF carving sizes from the header, types AVI/WAV, and drops bogus forms")
     func carveRIFFContainers() async throws {
         let size = 300_000

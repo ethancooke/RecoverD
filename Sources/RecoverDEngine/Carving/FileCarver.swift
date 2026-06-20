@@ -16,6 +16,9 @@ public enum ContainerKind: Sendable, Hashable {
     /// Matroska/WebM (EBML): the size comes from the Segment element's size field, a variable-
     /// length integer right after the Segment ID.
     case ebml
+    /// Fujifilm RAF: a header directory at fixed offsets points to the embedded JPEG and the raw
+    /// (CFA) data; the file end is the furthest of those offset+length pairs.
+    case raf
 }
 
 /// A recognizable file signature (magic bytes) used for carving.
@@ -119,7 +122,8 @@ public struct SignatureFileCarver: FileCarver {
                           container: .tiff, displayName: "Panasonic RAW"),
             FileSignature(magic: [0x46, 0x55, 0x4A, 0x49, 0x46, 0x49, 0x4C, 0x4D], // "FUJIFILM"
                           fileExtension: "raf", fileType: .image,
-                          maxExpectedSize: 128 * 1024 * 1024, displayName: "Fujifilm RAW"),
+                          maxExpectedSize: 256 * 1024 * 1024,
+                          container: .raf, displayName: "Fujifilm RAW"),
             FileSignature(magic: [0x46, 0x4F, 0x56, 0x62],           // "FOVb"
                           fileExtension: "x3f", fileType: .image,
                           maxExpectedSize: 128 * 1024 * 1024, displayName: "Sigma RAW"),
