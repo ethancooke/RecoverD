@@ -155,6 +155,34 @@ struct ScanEngineTests {
         await engine.clear()
     }
 
+    @Test("Deep scan carves standalone TIFF but skips a TIFF header embedded in JPEG EXIF")
+    func carveTIFFSkipsEmbeddedEXIF() async throws {
+        let size = 200_000
+        var bytes = [UInt8](repeating: 0, count: size)
+        // A standalone TIFF.
+        let standalone = 20_000
+        bytes.replaceSubrange(standalone..<standalone + 4, with: [0x49, 0x49, 0x2A, 0x00])
+        // A TIFF header embedded in a JPEG's EXIF (preceded by "Exif\0\0") — must NOT be carved.
+        let exifTiff = 60_000
+        bytes.replaceSubrange(exifTiff - 6..<exifTiff, with: Array("Exif".utf8) + [0x00, 0x00])
+        bytes.replaceSubrange(exifTiff..<exifTiff + 4, with: [0x49, 0x49, 0x2A, 0x00])
+
+        let reader = InMemoryBlockReader(bytes)
+        let device = DeviceInfo(
+            id: DeviceID("t"), displayName: "t", bsdName: "x", devicePath: "/x", rawPath: "/x",
+            totalSize: Int64(size), blockSize: 512, isRemovable: true, isExternal: true
+        )
+        let engine = ScanEngine()
+        await engine.startScan(device: device, mode: .deep, reader: reader)
+        let stream = await engine.subscribeProgress()
+        for await update in stream where update.phase == .complete { break }
+        let files = await engine.snapshot().files
+
+        #expect(files.first { $0.byteOffset == Int64(standalone) }?.fileType == .image)
+        #expect(!files.contains { $0.byteOffset == Int64(exifTiff) })
+        await engine.clear()
+    }
+
     @Test("Deep scan carves Matroska (EBML) and MPEG-PS signatures as video")
     func carveMatroskaAndMPEG() async throws {
         let size = 200_000

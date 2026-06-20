@@ -69,7 +69,9 @@ func decodeUTF16String(_ units: [UInt16], maxLength: Int) -> String {
 func inferFileTypeFromName(_ name: String) -> RecoverableFileType {
     let ext = (name as NSString).pathExtension.lowercased()
     switch ext {
-    case "jpg", "jpeg", "png", "gif", "bmp", "heic", "tiff", "tif": return .image
+    case "jpg", "jpeg", "png", "gif", "bmp", "heic", "heif", "webp", "tiff", "tif",
+         "cr2", "cr3", "nef", "nrw", "arw", "sr2", "srf", "dng", "orf", "rw2", "raf",
+         "x3f", "pef", "3fr", "raw": return .image
     case "mp4", "mov", "avi", "mkv", "m4v", "webm",
          "mpeg", "mpg", "ts", "m2ts", "vob", "wmv", "flv": return .video
     case "mp3", "wav", "aac", "flac", "m4a", "m4b", "ogg", "oga", "opus", "aiff", "aif": return .audio

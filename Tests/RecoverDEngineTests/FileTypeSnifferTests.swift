@@ -67,6 +67,26 @@ struct FileTypeSnifferTests {
         #expect(FileTypeSniffer.detect(jpeg)?.fileType == .image)
     }
 
+    @Test func detectsTIFFAndCameraRAW() {
+        // Little-endian TIFF.
+        let tiffLE: [UInt8] = [0x49, 0x49, 0x2A, 0x00] + [UInt8](repeating: 0, count: 32)
+        #expect(FileTypeSniffer.detect(tiffLE)?.fileType == .image)
+        #expect(FileTypeSniffer.detect(tiffLE)?.fileExtension == "tiff")
+        // Big-endian TIFF.
+        let tiffBE: [UInt8] = [0x4D, 0x4D, 0x00, 0x2A] + [UInt8](repeating: 0, count: 32)
+        #expect(FileTypeSniffer.detect(tiffBE)?.fileExtension == "tiff")
+        // Canon CR2: TIFF magic + "CR" at offset 8.
+        let cr2: [UInt8] = [0x49, 0x49, 0x2A, 0x00, 0x10, 0, 0, 0, 0x43, 0x52, 0x02, 0x00]
+            + [UInt8](repeating: 0, count: 16)
+        #expect(FileTypeSniffer.detect(cr2)?.fileExtension == "cr2")
+        // Distinct-magic RAWs.
+        #expect(FileTypeSniffer.detect(Array("IIRO".utf8) + [UInt8](repeating: 0, count: 8))?.fileExtension == "orf")
+        #expect(FileTypeSniffer.detect(Array("FUJIFILM".utf8) + [UInt8](repeating: 0, count: 8))?.fileExtension == "raf")
+        // Canon CR3 via ISO-BMFF brand "crx ".
+        let cr3: [UInt8] = [0, 0, 0, 0x18] + Array("ftypcrx ".utf8) + [UInt8](repeating: 0, count: 16)
+        #expect(FileTypeSniffer.detect(cr3)?.fileExtension == "cr3")
+    }
+
     @Test func detectsMP4ByFtypBox() {
         let mp4: [UInt8] = [0, 0, 0, 0x18] + Array("ftypisom".utf8) + [UInt8](repeating: 0, count: 16)
         let d = FileTypeSniffer.detect(mp4)

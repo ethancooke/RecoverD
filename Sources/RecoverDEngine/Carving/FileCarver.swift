@@ -10,6 +10,9 @@ public enum ContainerKind: Sendable, Hashable {
     /// ISO base media (MP4/MOV/M4A/HEIC): the `ftyp` magic sits 4 bytes into the file; the size
     /// comes from walking the top-level box chain. The brand (bytes 8–11) gives the real type.
     case isoBMFF
+    /// TIFF and TIFF-based camera RAW (`II*\0` / `MM\0*`): the engine skips the copy embedded in
+    /// JPEG EXIF and labels Canon CR2 (which has `CR` at offset 8) specifically.
+    case tiff
 }
 
 /// A recognizable file signature (magic bytes) used for carving.
@@ -91,6 +94,29 @@ public struct SignatureFileCarver: FileCarver {
             FileSignature(magic: [0x47, 0x49, 0x46, 0x38],
                           fileExtension: "gif", fileType: .image,
                           maxExpectedSize: 64 * 1024 * 1024, displayName: "GIF image"),
+            // TIFF (and most camera RAW: NEF/ARW/DNG/CR2/3FR/…), both byte orders. Size-capped —
+            // TIFF readers use the IFD offsets, so trailing bytes are ignored when opened.
+            FileSignature(magic: [0x49, 0x49, 0x2A, 0x00],
+                          fileExtension: "tiff", fileType: .image,
+                          maxExpectedSize: 128 * 1024 * 1024,
+                          container: .tiff, displayName: "TIFF/RAW image"),
+            FileSignature(magic: [0x4D, 0x4D, 0x00, 0x2A],
+                          fileExtension: "tiff", fileType: .image,
+                          maxExpectedSize: 128 * 1024 * 1024,
+                          container: .tiff, displayName: "TIFF/RAW image"),
+            // Camera RAW with distinctive magics (no EXIF-collision risk).
+            FileSignature(magic: [0x49, 0x49, 0x52, 0x4F],            // "IIRO"
+                          fileExtension: "orf", fileType: .image,
+                          maxExpectedSize: 128 * 1024 * 1024, displayName: "Olympus RAW"),
+            FileSignature(magic: [0x49, 0x49, 0x55, 0x00],            // "IIU\0"
+                          fileExtension: "rw2", fileType: .image,
+                          maxExpectedSize: 128 * 1024 * 1024, displayName: "Panasonic RAW"),
+            FileSignature(magic: [0x46, 0x55, 0x4A, 0x49, 0x46, 0x49, 0x4C, 0x4D], // "FUJIFILM"
+                          fileExtension: "raf", fileType: .image,
+                          maxExpectedSize: 128 * 1024 * 1024, displayName: "Fujifilm RAW"),
+            FileSignature(magic: [0x46, 0x4F, 0x56, 0x62],           // "FOVb"
+                          fileExtension: "x3f", fileType: .image,
+                          maxExpectedSize: 128 * 1024 * 1024, displayName: "Sigma RAW"),
             FileSignature(magic: [0x25, 0x50, 0x44, 0x46, 0x2D],
                           fileExtension: "pdf", fileType: .document,
                           maxExpectedSize: 256 * 1024 * 1024,
@@ -212,6 +238,9 @@ public struct SignatureFileCarver: FileCarver {
         }
         if b.hasPrefix("hei") || b == "mif1" || b == "msf1" || b == "avif" {
             return RIFFForm(fileExtension: "heic", fileType: .image, displayName: "HEIF image")
+        }
+        if b.hasPrefix("crx") {
+            return RIFFForm(fileExtension: "cr3", fileType: .image, displayName: "Canon RAW")
         }
         if b.hasPrefix("qt") {
             return RIFFForm(fileExtension: "mov", fileType: .video, displayName: "QuickTime video")

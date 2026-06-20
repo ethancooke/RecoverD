@@ -246,6 +246,28 @@ public actor ScanEngine {
                             continue
                         }
 
+                        // TIFF / TIFF-based RAW. Skip the copy embedded in JPEG EXIF (preceded by
+                        // "Exif\0\0"), otherwise every photo would yield a bogus image. Label Canon
+                        // CR2 (little-endian TIFF with "CR" at offset 8); size is capped.
+                        if signature.container == .tiff {
+                            if rel >= 6,
+                               buf[rel - 6] == 0x45, buf[rel - 5] == 0x78, buf[rel - 4] == 0x69,
+                               buf[rel - 3] == 0x66, buf[rel - 2] == 0x00, buf[rel - 1] == 0x00 {
+                                continue // embedded EXIF block, not a standalone file
+                            }
+                            guard seenOffsets.insert(absolute).inserted else { continue }
+                            var ext = signature.fileExtension, name = signature.displayName
+                            if signature.magic[0] == 0x49, rel + 10 <= buf.count,
+                               buf[rel + 8] == 0x43, buf[rel + 9] == 0x52 { // "CR" ⇒ Canon CR2
+                                ext = "cr2"; name = "Canon RAW"
+                            }
+                            let size = min(signature.maxExpectedSize, total - absolute)
+                            riff.append(carver.makeContainerFile(
+                                fileExtension: ext, fileType: .image, displayName: name,
+                                offset: absolute, size: size, confidence: 0.6, deviceID: device.id))
+                            continue
+                        }
+
                         // Validate the byte after the magic when the signature demands it. If the
                         // magic lands at the very end of the chunk the follow byte isn't available
                         // yet — skip without recording it so the next (overlapping) chunk retries.
