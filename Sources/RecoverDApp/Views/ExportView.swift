@@ -41,6 +41,13 @@ struct ExportView: View {
                     .foregroundStyle(.green)
             }
 
+            if let error = session.lastError {
+                Label(error, systemImage: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.red)
+                    .font(.caption)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
             Spacer()
             buttonBar
         }

@@ -6,10 +6,24 @@ import RecoverDEngine
 /// Shows an imaging step when creating a .dmg of a physical device.
 /// During scanning, shows files found so far in real time — with selection and recovery
 /// available even while the scan is running.
+/// Ordering options for the live "files found so far" list. Default keeps discovery order so the
+/// feed reads like a live stream; the others sort a copy on demand (cheap — the list is capped at
+/// `displayLimit` rows and the array is only a few thousand items).
+enum FileSortKey: String, CaseIterable {
+    case found = "Found order"
+    case largest = "Largest first"
+    case smallest = "Smallest first"
+    case name = "Name"
+    case type = "Type"
+}
+
 struct ScanProgressView: View {
     @Bindable var session: RecoverySessionViewModel
     @State private var selection: Set<FileID> = []
     @State private var presentingExport = false
+    @State private var sortKey: FileSortKey = .found
+
+    private let displayLimit = 100
 
     var body: some View {
         VStack(spacing: 0) {
@@ -50,6 +64,28 @@ struct ScanProgressView: View {
 
     private var selectedFiles: [RecoverableFile] {
         currentFiles.filter { selection.contains($0.id) }
+    }
+
+    /// The (sorted) slice actually rendered. Capped at `displayLimit` rows so sorting and SwiftUI
+    /// diffing stay cheap no matter how many files the scan has found.
+    private var displayedFiles: [RecoverableFile] {
+        switch sortKey {
+        case .found:
+            // Discovery order — show the most recent finds, like a live feed.
+            return Array(currentFiles.suffix(displayLimit))
+        case .largest:
+            return Array(currentFiles.sorted { $0.size > $1.size }.prefix(displayLimit))
+        case .smallest:
+            return Array(currentFiles.sorted { $0.size < $1.size }.prefix(displayLimit))
+        case .name:
+            return Array(currentFiles
+                .sorted { $0.displayName.localizedStandardCompare($1.displayName) == .orderedAscending }
+                .prefix(displayLimit))
+        case .type:
+            return Array(currentFiles
+                .sorted { $0.fileType.displayName < $1.fileType.displayName }
+                .prefix(displayLimit))
+        }
     }
 
     // MARK: Imaging
@@ -148,9 +184,18 @@ struct ScanProgressView: View {
 
     private var liveResultsView: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack {
+            HStack(spacing: 12) {
                 Text("Files found so far")
                     .font(.headline)
+
+                Picker("Sort", selection: $sortKey) {
+                    ForEach(FileSortKey.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+                }
+                .pickerStyle(.menu)
+                .labelsHidden()
+                .fixedSize()
+                .help("Sort the files found so far")
+
                 Spacer()
                 Text("\(currentFiles.count) total · \(selection.count) selected")
                     .font(.caption)
@@ -159,7 +204,7 @@ struct ScanProgressView: View {
             .padding(.horizontal, 40)
 
             VStack(spacing: 0) {
-                ForEach(currentFiles.suffix(100)) { file in
+                ForEach(displayedFiles) { file in
                     fileRow(file)
                 }
             }

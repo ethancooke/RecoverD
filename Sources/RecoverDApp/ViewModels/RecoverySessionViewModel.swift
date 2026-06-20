@@ -70,7 +70,11 @@ final class RecoverySessionViewModel {
         }
     }
 
-    init() {}
+    /// The live session, so the app delegate can wipe RAM on quit. There's only ever one (held by
+    /// `ContentView`), so a weak static is enough.
+    static weak var shared: RecoverySessionViewModel?
+
+    init() { Self.shared = self }
 
     // Cancellation is handled by stopDevicePolling()/clear(); tasks also self-cancel via
     // Task.isCancelled checks. No deinit body is needed (and @MainActor deinits can't touch
@@ -181,6 +185,7 @@ final class RecoverySessionViewModel {
         result = nil
         thumbnails.removeAll()
         thumbnailLoading.removeAll()
+        thumbnailFailed.removeAll()
 
         // 1. Scan the mounted filesystem for live files (no privilege needed)
         let scanner = MountedVolumeScanner(mountPoint: mountPoint, deviceID: device.id)
@@ -223,6 +228,7 @@ final class RecoverySessionViewModel {
         lastError = nil
         thumbnails.removeAll()
         thumbnailLoading.removeAll()
+        thumbnailFailed.removeAll()
         beginProgressSubscription()
         await engine.startScan(device: device, mode: scanMode, reader: reader)
 
@@ -324,6 +330,7 @@ final class RecoverySessionViewModel {
         progressTask = nil
         thumbnails.removeAll()
         thumbnailLoading.removeAll()
+        thumbnailFailed.removeAll()
         previewFile = nil
         result = nil
         progress = ScanProgress()
@@ -343,9 +350,14 @@ final class RecoverySessionViewModel {
     private let thumbnailSize = 128
     private let maxThumbnailSourceBytes: Int64 = 16 * 1024 * 1024
 
+    /// Files whose thumbnail couldn't be produced (corrupt/false-positive carves). Tracked so we
+    /// don't re-read the device on every re-render — that turned a few bad carves into a flood of
+    /// reads that starved real work (preview/export) on the serialized device reader.
+    private var thumbnailFailed: Set<FileID> = []
+
     func thumbnail(for file: RecoverableFile) -> NSImage? {
         if let existing = thumbnails[file.id] { return existing }
-        guard thumbnailLoading.contains(file.id) == false else { return nil }
+        guard !thumbnailLoading.contains(file.id), !thumbnailFailed.contains(file.id) else { return nil }
         guard canThumbnail(file) else { return nil }
         thumbnailLoading.insert(file.id)
         Task { await generateThumbnail(for: file) }
@@ -357,19 +369,18 @@ final class RecoverySessionViewModel {
     }
 
     private func generateThumbnail(for file: RecoverableFile) async {
-        defer { thumbnailLoading.remove(file.id) }
-
+        let produced: Bool
         switch file.fileType {
-        case .image:
-            await generateImageThumbnail(for: file)
-        case .video:
-            await generateVideoThumbnail(for: file)
-        default:
-            break
+        case .image: produced = await generateImageThumbnail(for: file)
+        case .video: produced = await generateVideoThumbnail(for: file)
+        default: produced = false
         }
+        thumbnailLoading.remove(file.id)
+        // Remember failures so we don't retry (and re-read the device) on every render.
+        if !produced { thumbnailFailed.insert(file.id) }
     }
 
-    private func generateImageThumbnail(for file: RecoverableFile) async {
+    private func generateImageThumbnail(for file: RecoverableFile) async -> Bool {
         do {
             let content: SecureData
             if file.id.rawValue.hasPrefix("mounted:"),
@@ -379,16 +390,16 @@ final class RecoverySessionViewModel {
                 content = try await engine.readContent(for: file, maxLength: maxThumbnailSourceBytes)
             }
             defer { content.wipe() }
-            guard let fullImage = content.withUnsafeBytes({ buf in NSImage(data: Data(buf)) }) else { return }
-            let thumb = downscale(fullImage, to: thumbnailSize)
-            thumbnails[file.id] = thumb
+            guard let fullImage = content.withUnsafeBytes({ buf in NSImage(data: Data(buf)) }) else { return false }
+            thumbnails[file.id] = downscale(fullImage, to: thumbnailSize)
+            return true
         } catch {
-            // Best-effort.
+            return false
         }
     }
 
-    private func generateVideoThumbnail(for file: RecoverableFile) async {
-        guard let contentReader = contentReader(for: file) else { return }
+    private func generateVideoThumbnail(for file: RecoverableFile) async -> Bool {
+        guard let contentReader = contentReader(for: file) else { return false }
         let loader = InMemoryAssetLoader(contentReader: contentReader)
         let asset = loader.makeAsset()
 
@@ -401,8 +412,10 @@ final class RecoverySessionViewModel {
             let time = CMTime(seconds: min(1.0, CMTimeGetSeconds(duration) / 2), preferredTimescale: 600)
             let cgImage = try await generator.image(at: time).image
             thumbnails[file.id] = NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
+            return true
         } catch {
             // Best-effort — video may be corrupted.
+            return false
         }
     }
 
@@ -500,9 +513,41 @@ final class RecoverySessionViewModel {
 
     // MARK: Quit / wipe
 
+    /// Deterministic best-effort wipe for app termination. Called synchronously from
+    /// `applicationWillTerminate` (main thread), where we can't `await`.
+    ///
+    /// Strategy:
+    ///   - Drop every in-RAM reference we hold on the main actor *now* — thumbnails (rendered
+    ///     previews of recovered images), the result/metadata, any preview in flight. Releasing
+    ///     them lets ARC free the memory and runs `SecureData.deinit`, which zeroes its buffers.
+    ///   - Tear down the engine state and close the device fd on their own actors, blocking the
+    ///     main thread only briefly. Those actors aren't the main actor, so waiting here can't
+    ///     deadlock them.
+    ///
+    /// Not bit-perfect (we can't zero `NSImage`'s backing store), but it stops reading the device,
+    /// releases all recovered content, and doesn't leave a half-finished scan resident.
     func wipeAllOnQuit() {
-        // Best-effort on quit; deterministic secure-on-quit is a tracked item.
-        progressTask?.cancel()
-        Task { [weak self] in await self?.clear() }
+        progressTask?.cancel(); progressTask = nil
+        devicePollTask?.cancel(); devicePollTask = nil
+        thumbnails.removeAll()
+        thumbnailLoading.removeAll()
+        thumbnailFailed.removeAll()
+        previewFile = nil
+        result = nil
+        lastError = nil
+        progress = ScanProgress()
+
+        let engine = self.engine
+        let rawReader = self.rawReader
+        self.rawReader = nil
+        self.reader = nil
+
+        let done = DispatchSemaphore(value: 0)
+        Task.detached {
+            await engine.clear()
+            await rawReader?.close()
+            done.signal()
+        }
+        _ = done.wait(timeout: .now() + 2)
     }
 }

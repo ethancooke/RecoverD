@@ -9,6 +9,10 @@ struct PreviewView: View {
     let contentReader: FileContentReader
     @Environment(\.dismiss) private var dismiss
 
+    private var fileExtension: String {
+        (file.displayName as NSString).pathExtension
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             headerBar
@@ -42,9 +46,11 @@ struct PreviewView: View {
         case .image:
             PhotoPreviewView(contentReader: contentReader)
         case .video:
-            VideoPreviewView(contentReader: contentReader, fileSize: file.size)
+            VideoPreviewView(contentReader: contentReader, fileSize: file.size,
+                             fileExtension: fileExtension)
         case .audio:
-            VideoPreviewView(contentReader: contentReader, fileSize: file.size, audioOnly: true)
+            VideoPreviewView(contentReader: contentReader, fileSize: file.size, audioOnly: true,
+                             fileExtension: fileExtension)
         case .document:
             PDFPreviewView(contentReader: contentReader)
         case .text:

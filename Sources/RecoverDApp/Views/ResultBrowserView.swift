@@ -20,16 +20,17 @@ struct ResultBrowserView: View {
         result.files.filter { selection.contains($0.id) }
     }
 
+    private var allFilteredSelected: Bool {
+        !filteredFiles.isEmpty && filteredFiles.allSatisfy { selection.contains($0.id) }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             filterBar
             Divider()
-            List(selection: $selection) {
+            List {
                 ForEach(filteredFiles) { file in
-                    ResultRow(file: file, session: session)
-                        .tag(file.id)
-                        .contentShape(Rectangle())
-                        .onTapGesture(count: 2) { session.openPreview(for: file) }
+                    rowView(file)
                 }
             }
             Divider()
@@ -45,6 +46,37 @@ struct ResultBrowserView: View {
                 Text("No source loaded").padding()
             }
         }
+    }
+
+    /// A result row with an explicit selection checkbox and preview button. We drive selection
+    /// ourselves rather than relying on `List(selection:)`, whose single-click selection is
+    /// swallowed by the row's tap gesture on macOS.
+    @ViewBuilder
+    private func rowView(_ file: RecoverableFile) -> some View {
+        let isSelected = selection.contains(file.id)
+        HStack(spacing: 12) {
+            Button {
+                if isSelected { selection.remove(file.id) } else { selection.insert(file.id) }
+            } label: {
+                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                    .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
+                    .font(.system(size: 18))
+            }
+            .buttonStyle(.plain)
+            .help("Select this file for recovery")
+
+            ResultRow(file: file, session: session)
+
+            Button {
+                session.openPreview(for: file)
+            } label: {
+                Image(systemName: "eye").foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+            .help("Preview this file (photo, video, PDF, text)")
+        }
+        .contentShape(Rectangle())
+        .onTapGesture(count: 2) { session.openPreview(for: file) }
     }
 
     private var filterBar: some View {
@@ -74,6 +106,18 @@ struct ResultBrowserView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .help("Number of files you've selected for recovery")
+
+            Button(allFilteredSelected ? "Deselect All" : "Select All") {
+                if allFilteredSelected {
+                    filteredFiles.forEach { selection.remove($0.id) }
+                } else {
+                    selection.formUnion(filteredFiles.map(\.id))
+                }
+            }
+            .buttonStyle(.link)
+            .disabled(filteredFiles.isEmpty)
+            .help("Select or deselect every file currently shown")
+
             Spacer()
             Button("Recover Selected…") {
                 presentingExport = true

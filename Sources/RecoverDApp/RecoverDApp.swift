@@ -33,6 +33,10 @@ final class RecoverDAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        // No-op for now; ContentView clears its session on disappear. See note above.
+        // AppKit calls this on the main thread; run the synchronous wipe of all in-RAM recovered
+        // content + the device fd before the process exits.
+        MainActor.assumeIsolated {
+            RecoverySessionViewModel.shared?.wipeAllOnQuit()
+        }
     }
 }

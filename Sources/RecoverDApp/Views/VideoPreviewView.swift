@@ -11,11 +11,20 @@ struct VideoPreviewView: View {
     let contentReader: FileContentReader
     let fileSize: Int64
     var audioOnly: Bool = false
+    /// Lowercased container extension (e.g. "avi"), used to short-circuit formats AVFoundation
+    /// can't open so we show an honest message instead of a cryptic decode error.
+    var fileExtension: String = ""
 
     @State private var player: AVPlayer?
     @State private var isLoading = true
     @State private var loadError: String?
     @State private var assetLoader: InMemoryAssetLoader?
+
+    /// Containers macOS' AVFoundation cannot open. AVI is the one the signature carver produces
+    /// (from the RIFF magic); the rest are here so any future signatures fail gracefully too.
+    private static let unsupportedContainers: Set<String> = [
+        "avi", "mkv", "wmv", "flv", "webm", "ogv", "vob", "asf", "rm", "rmvb"
+    ]
 
     var body: some View {
         ZStack {
@@ -35,6 +44,15 @@ struct VideoPreviewView: View {
     private func setupPlayer() async {
         isLoading = true
         loadError = nil
+
+        if Self.unsupportedContainers.contains(fileExtension.lowercased()) {
+            let fmt = fileExtension.uppercased()
+            loadError = "\(fmt) files can't be previewed here — macOS media playback doesn't "
+                + "support this format. You can still recover the file and open it in another "
+                + "player such as VLC."
+            isLoading = false
+            return
+        }
 
         let loader = InMemoryAssetLoader(contentReader: contentReader)
         assetLoader = loader
@@ -60,7 +78,8 @@ struct VideoPreviewView: View {
             _ = duration
         } catch {
             await MainActor.run {
-                self.loadError = "Could not open media: \(error.localizedDescription)"
+                self.loadError = "Couldn't play this file — it may be corrupted, incomplete, or "
+                    + "in a format macOS can't open. You can still recover it to disk."
                 self.isLoading = false
             }
         }
