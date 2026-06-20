@@ -109,6 +109,45 @@ struct ScanEngineTests {
         await engine.clear()
     }
 
+    @Test("Carve options gate best-guess and RAW formats")
+    func carveOptionsFilterFormats() async throws {
+        let size = 200_000
+        var bytes = [UInt8](repeating: 0, count: size)
+        let jpeg = 10_000   // core
+        bytes.replaceSubrange(jpeg..<jpeg + 4, with: [0xFF, 0xD8, 0xFF, 0xE0])
+        bytes.replaceSubrange(jpeg + 3000..<jpeg + 3002, with: [0xFF, 0xD9])
+        let gif = 50_000    // best-guess
+        bytes.replaceSubrange(gif..<gif + 4, with: [0x47, 0x49, 0x46, 0x38])
+        let tiff = 90_000   // raw — minimal valid IFD
+        bytes.replaceSubrange(tiff..<tiff + 4, with: [0x49, 0x49, 0x2A, 0x00])
+        bytes.replaceSubrange(tiff + 4..<tiff + 8, with: [0x08, 0x00, 0x00, 0x00])
+        bytes.replaceSubrange(tiff + 8..<tiff + 10, with: [0x01, 0x00])
+        bytes.replaceSubrange(tiff + 10..<tiff + 22,
+            with: [0x00, 0x01, 0x03, 0x00, 0x01, 0x00, 0x00, 0x00, 0x64, 0x00, 0x00, 0x00])
+
+        func offsets(_ options: CarveOptions) async -> Set<Int64> {
+            let reader = InMemoryBlockReader(bytes)
+            let device = DeviceInfo(
+                id: DeviceID("t"), displayName: "t", bsdName: "x", devicePath: "/x", rawPath: "/x",
+                totalSize: Int64(size), blockSize: 512, isRemovable: true, isExternal: true)
+            let engine = ScanEngine()
+            await engine.startScan(device: device, mode: .deep, reader: reader, options: options)
+            let stream = await engine.subscribeProgress()
+            for await u in stream where u.phase == .complete { break }
+            let result = Set(await engine.snapshot().files.map(\.byteOffset))
+            await engine.clear()
+            return result
+        }
+
+        let core = await offsets(CarveOptions())
+        #expect(core.contains(Int64(jpeg)))
+        #expect(!core.contains(Int64(gif)))    // best-guess skipped by default
+        #expect(!core.contains(Int64(tiff)))   // RAW skipped by default
+
+        #expect(await offsets(CarveOptions(tryHarder: true)).contains(Int64(gif)))
+        #expect(await offsets(CarveOptions(includeRAW: true)).contains(Int64(tiff)))
+    }
+
     @Test("Fujifilm RAF is sized from its header directory, not the cap")
     func carveRAFFromDirectory() async throws {
         let size = 200_000
@@ -131,7 +170,7 @@ struct ScanEngineTests {
             totalSize: Int64(size), blockSize: 512, isRemovable: true, isExternal: true
         )
         let engine = ScanEngine()
-        await engine.startScan(device: device, mode: .deep, reader: reader)
+        await engine.startScan(device: device, mode: .deep, reader: reader, options: CarveOptions(includeRAW: true))
         let stream = await engine.subscribeProgress()
         for await update in stream where update.phase == .complete { break }
         let raf = try #require(await engine.snapshot().files.first { $0.byteOffset == Int64(off) })
@@ -220,7 +259,7 @@ struct ScanEngineTests {
             totalSize: Int64(size), blockSize: 512, isRemovable: true, isExternal: true
         )
         let engine = ScanEngine()
-        await engine.startScan(device: device, mode: .deep, reader: reader)
+        await engine.startScan(device: device, mode: .deep, reader: reader, options: CarveOptions(includeRAW: true))
         let stream = await engine.subscribeProgress()
         for await update in stream where update.phase == .complete { break }
         let files = await engine.snapshot().files
@@ -259,7 +298,7 @@ struct ScanEngineTests {
             totalSize: Int64(size), blockSize: 512, isRemovable: true, isExternal: true
         )
         let engine = ScanEngine()
-        await engine.startScan(device: device, mode: .deep, reader: reader)
+        await engine.startScan(device: device, mode: .deep, reader: reader, options: CarveOptions(tryHarder: true))
         let stream = await engine.subscribeProgress()
         for await update in stream where update.phase == .complete { break }
         let files = await engine.snapshot().files

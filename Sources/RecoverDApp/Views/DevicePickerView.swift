@@ -110,6 +110,16 @@ struct DevicePickerView: View {
             .pickerStyle(.radioGroup)
             .labelsHidden()
             .help("Quick Scan: parses the file system for deleted entries (fast). Deep / Carving Scan: also scans raw blocks for file signatures (slow, works on reformatted/corrupted drives).")
+
+            // Carve-scope options (only meaningful for a deep/carving scan).
+            if session.scanMode == .deep {
+                Toggle("Try harder (best-guess formats)", isOn: $session.tryHarderCarve)
+                    .toggleStyle(.checkbox)
+                    .help("Also carve formats we can't size exactly (GIF, ZIP, MP3, FLAC, Ogg, MPEG). Recovery of these is more of a best guess.")
+                Toggle("Include camera RAW", isOn: $session.includeRAWCarve)
+                    .toggleStyle(.checkbox)
+                    .help("Carve TIFF and camera RAW (CR2/CR3/NEF/ARW/ORF/RW2/RAF/X3F). RAW often recovers but may not be usable, and adds a lot of large files.")
+            }
         }
     }
 

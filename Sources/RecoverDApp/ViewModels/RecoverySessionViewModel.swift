@@ -38,6 +38,9 @@ final class RecoverySessionViewModel {
     var devices: [DeviceInfo] = []
     var selectedDevice: DeviceInfo?
     var scanMode: ScanMode = .quick
+    /// Deep-scan carve options chosen before starting (Try harder / include RAW).
+    var tryHarderCarve: Bool = false
+    var includeRAWCarve: Bool = false
     var progress: ScanProgress = ScanProgress()
     var result: ScanResult?
     var lastError: String?
@@ -231,7 +234,8 @@ final class RecoverySessionViewModel {
         thumbnailLoading.removeAll()
         thumbnailFailed.removeAll()
         beginProgressSubscription()
-        await engine.startScan(device: device, mode: scanMode, reader: reader)
+        await engine.startScan(device: device, mode: scanMode, reader: reader,
+                               options: CarveOptions(tryHarder: tryHarderCarve, includeRAW: includeRAWCarve))
 
         // After the scan completes, merge in the live files from the filesystem scan
         // (the engine's snapshot will have deleted/carved files from the raw scan)
@@ -271,7 +275,8 @@ final class RecoverySessionViewModel {
         lastError = nil
         thumbnails.removeAll()
         beginProgressSubscription()
-        await engine.startScan(device: device, mode: scanMode, reader: reader)
+        await engine.startScan(device: device, mode: scanMode, reader: reader,
+                               options: CarveOptions(tryHarder: tryHarderCarve, includeRAW: includeRAWCarve))
     }
 
     private func beginProgressSubscription() {

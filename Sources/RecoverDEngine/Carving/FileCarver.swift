@@ -21,6 +21,29 @@ public enum ContainerKind: Sendable, Hashable {
     case raf
 }
 
+/// Which scan tier a signature belongs to, so the UI can trade recall for precision/speed.
+public enum SignatureCategory: Sendable, Hashable {
+    /// Sized exactly and high-yield — always scanned.
+    case core
+    /// Can't be sized exactly (no length field / end marker), so recovery is a best guess —
+    /// scanned only with "Try harder".
+    case bestGuess
+    /// Camera RAW (and TIFF, which shares the magic) — scanned only when RAW is included.
+    case raw
+}
+
+/// Carve options chosen in the UI before a deep scan.
+public struct CarveOptions: Sendable, Hashable {
+    /// Include `.bestGuess` formats (GIF/ZIP/MP3/FLAC/Ogg/MPEG) we can't size exactly.
+    public var tryHarder: Bool
+    /// Include camera RAW + TIFF.
+    public var includeRAW: Bool
+    public init(tryHarder: Bool = false, includeRAW: Bool = false) {
+        self.tryHarder = tryHarder
+        self.includeRAW = includeRAW
+    }
+}
+
 /// A recognizable file signature (magic bytes) used for carving.
 public struct FileSignature: Sendable, Hashable {
     public let magic: [UInt8]
@@ -29,6 +52,7 @@ public struct FileSignature: Sendable, Hashable {
     public let maxExpectedSize: Int64
     public let footer: [UInt8]?
     public let displayName: String
+    public let category: SignatureCategory
 
     /// Optional allow-list for the single byte immediately following `magic`. When non-nil, a
     /// magic match is only accepted if that next byte is in this set. This cheaply rejects the
@@ -47,6 +71,7 @@ public struct FileSignature: Sendable, Hashable {
                 footer: [UInt8]? = nil,
                 headerFollowSet: Set<UInt8>? = nil,
                 container: ContainerKind? = nil,
+                category: SignatureCategory = .core,
                 displayName: String) {
         self.magic = magic
         self.fileExtension = fileExtension
@@ -55,6 +80,7 @@ public struct FileSignature: Sendable, Hashable {
         self.footer = footer
         self.headerFollowSet = headerFollowSet
         self.container = container
+        self.category = category
         self.displayName = displayName
     }
 }
@@ -99,34 +125,36 @@ public struct SignatureFileCarver: FileCarver {
             // marker — so this stays size-capped rather than footer-bounded.
             FileSignature(magic: [0x47, 0x49, 0x46, 0x38],
                           fileExtension: "gif", fileType: .image,
-                          maxExpectedSize: 64 * 1024 * 1024, displayName: "GIF image"),
+                          maxExpectedSize: 64 * 1024 * 1024,
+                          category: .bestGuess, displayName: "GIF image"),
             // TIFF (and most camera RAW: NEF/ARW/DNG/CR2/3FR/…), both byte orders. Size-capped —
             // TIFF readers use the IFD offsets, so trailing bytes are ignored when opened.
             FileSignature(magic: [0x49, 0x49, 0x2A, 0x00],
                           fileExtension: "tiff", fileType: .image,
                           maxExpectedSize: 128 * 1024 * 1024,
-                          container: .tiff, displayName: "TIFF/RAW image"),
+                          container: .tiff, category: .raw, displayName: "TIFF/RAW image"),
             FileSignature(magic: [0x4D, 0x4D, 0x00, 0x2A],
                           fileExtension: "tiff", fileType: .image,
                           maxExpectedSize: 128 * 1024 * 1024,
-                          container: .tiff, displayName: "TIFF/RAW image"),
+                          container: .tiff, category: .raw, displayName: "TIFF/RAW image"),
             // Camera RAW with distinctive magics (no EXIF-collision risk). ORF/RW2 are TIFF-based,
             // so they go through the IFD sizer too (their "magic number" just isn't 42).
             FileSignature(magic: [0x49, 0x49, 0x52, 0x4F],            // "IIRO"
                           fileExtension: "orf", fileType: .image,
                           maxExpectedSize: 128 * 1024 * 1024,
-                          container: .tiff, displayName: "Olympus RAW"),
+                          container: .tiff, category: .raw, displayName: "Olympus RAW"),
             FileSignature(magic: [0x49, 0x49, 0x55, 0x00],            // "IIU\0"
                           fileExtension: "rw2", fileType: .image,
                           maxExpectedSize: 128 * 1024 * 1024,
-                          container: .tiff, displayName: "Panasonic RAW"),
+                          container: .tiff, category: .raw, displayName: "Panasonic RAW"),
             FileSignature(magic: [0x46, 0x55, 0x4A, 0x49, 0x46, 0x49, 0x4C, 0x4D], // "FUJIFILM"
                           fileExtension: "raf", fileType: .image,
                           maxExpectedSize: 256 * 1024 * 1024,
-                          container: .raf, displayName: "Fujifilm RAW"),
+                          container: .raf, category: .raw, displayName: "Fujifilm RAW"),
             FileSignature(magic: [0x46, 0x4F, 0x56, 0x62],           // "FOVb"
                           fileExtension: "x3f", fileType: .image,
-                          maxExpectedSize: 128 * 1024 * 1024, displayName: "Sigma RAW"),
+                          maxExpectedSize: 128 * 1024 * 1024,
+                          category: .raw, displayName: "Sigma RAW"),
             FileSignature(magic: [0x25, 0x50, 0x44, 0x46, 0x2D],
                           fileExtension: "pdf", fileType: .document,
                           maxExpectedSize: 256 * 1024 * 1024,
@@ -134,7 +162,8 @@ public struct SignatureFileCarver: FileCarver {
                           displayName: "PDF document"),
             FileSignature(magic: [0x50, 0x4B, 0x03, 0x04],
                           fileExtension: "zip", fileType: .archive,
-                          maxExpectedSize: 4 * 1024 * 1024 * 1024, displayName: "ZIP archive"),
+                          maxExpectedSize: 4 * 1024 * 1024 * 1024,
+                          category: .bestGuess, displayName: "ZIP archive"),
             // RIFF container (AVI / WAV / WebP). The engine parses the header to size it and pick
             // the real type; a hit with no recognized form type is rejected as a false positive.
             FileSignature(magic: [0x52, 0x49, 0x46, 0x46],
@@ -147,15 +176,17 @@ public struct SignatureFileCarver: FileCarver {
                           fileExtension: "mp3", fileType: .audio,
                           maxExpectedSize: 256 * 1024 * 1024,
                           headerFollowSet: [0x02, 0x03, 0x04],
-                          displayName: "MP3 audio"),
+                          category: .bestGuess, displayName: "MP3 audio"),
             // FLAC: the "fLaC" stream marker. No simple total-size field, so size-capped.
             FileSignature(magic: [0x66, 0x4C, 0x61, 0x43],
                           fileExtension: "flac", fileType: .audio,
-                          maxExpectedSize: 1024 * 1024 * 1024, displayName: "FLAC audio"),
+                          maxExpectedSize: 1024 * 1024 * 1024,
+                          category: .bestGuess, displayName: "FLAC audio"),
             // Ogg (Vorbis/Opus/FLAC): the "OggS" page marker. Usually audio.
             FileSignature(magic: [0x4F, 0x67, 0x67, 0x53],
                           fileExtension: "ogg", fileType: .audio,
-                          maxExpectedSize: 1024 * 1024 * 1024, displayName: "Ogg audio"),
+                          maxExpectedSize: 1024 * 1024 * 1024,
+                          category: .bestGuess, displayName: "Ogg audio"),
             // ISO base media (MP4/MOV/M4A/HEIC): the `ftyp` box type, which is 4 bytes into the
             // file. The engine backs up to the box start and walks the box chain to size it.
             FileSignature(magic: [0x66, 0x74, 0x79, 0x70],
@@ -176,8 +207,20 @@ public struct SignatureFileCarver: FileCarver {
                           maxExpectedSize: 4 * 1024 * 1024 * 1024,
                           footer: [0x00, 0x00, 0x01, 0xB9],
                           headerFollowSet: SignatureFileCarver.mpegPackBytes,
-                          displayName: "MPEG video")
+                          category: .bestGuess, displayName: "MPEG video")
         ]
+    }
+
+    /// The signatures to scan for under the given options. `.core` is always included; `.bestGuess`
+    /// and `.raw` are opt-in.
+    public func signatures(for options: CarveOptions) -> [FileSignature] {
+        signatures.filter { sig in
+            switch sig.category {
+            case .core: return true
+            case .bestGuess: return options.tryHarder
+            case .raw: return options.includeRAW
+            }
+        }
     }
 
     /// Valid bytes immediately after an MPEG-PS pack-header start code: MPEG-2 packs are

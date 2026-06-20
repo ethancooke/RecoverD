@@ -15,6 +15,7 @@ public actor ScanEngine {
     private var device: DeviceInfo?
     private var reader: (any RawBlockReader)?
     private var mode: ScanMode = .quick
+    private var carveOptions = CarveOptions()
     private var files: [RecoverableFile] = []
     private var errors: [ScanError] = []
     private var progress = ScanProgress()
@@ -31,11 +32,13 @@ public actor ScanEngine {
 
     // MARK: Scanning
 
-    public func startScan(device: DeviceInfo, mode: ScanMode, reader: any RawBlockReader) {
+    public func startScan(device: DeviceInfo, mode: ScanMode, reader: any RawBlockReader,
+                          options: CarveOptions = CarveOptions()) {
         cancel()
         self.device = device
         self.reader = reader
         self.mode = mode
+        self.carveOptions = options
         self.files = []
         self.errors = []
         self.bytesRead = 0
@@ -207,7 +210,7 @@ public actor ScanEngine {
         // signature), iterate the buffer once and only test signatures whose magic could start at
         // the current byte. Most bytes start no signature, so this is a large CPU win.
         var signaturesByFirstByte = [[FileSignature]](repeating: [], count: 256)
-        for signature in carver.signatures {
+        for signature in carver.signatures(for: carveOptions) {
             if let first = signature.magic.first { signaturesByFirstByte[Int(first)].append(signature) }
         }
 
