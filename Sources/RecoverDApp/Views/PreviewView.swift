@@ -9,8 +9,18 @@ struct PreviewView: View {
     let contentReader: FileContentReader
     @Environment(\.dismiss) private var dismiss
 
+    /// Set when the user runs content-based identification on an unknown file; once set, the
+    /// preview routes by the detected type instead of the (missing/misleading) extension.
+    @State private var detected: DetectedFileType?
+    @State private var identifying = false
+    @State private var identifyMessage: String?
+
     private var fileExtension: String {
-        (file.displayName as NSString).pathExtension
+        detected?.fileExtension ?? (file.displayName as NSString).pathExtension
+    }
+
+    private var effectiveType: RecoverableFileType {
+        detected?.fileType ?? file.fileType
     }
 
     var body: some View {
@@ -28,7 +38,11 @@ struct PreviewView: View {
                 Text(file.displayName).font(.headline).lineLimit(1)
                 HStack(spacing: 8) {
                     Text(ByteCountFormatter.string(fromByteCount: file.size, countStyle: .file))
-                    Text(file.fileType.displayName)
+                    if let detected {
+                        Text("identified as \(detected.displayName)").foregroundStyle(.blue)
+                    } else {
+                        Text(file.fileType.displayName)
+                    }
                     statusBadge
                 }
                 .font(.caption)
@@ -42,7 +56,7 @@ struct PreviewView: View {
 
     @ViewBuilder
     private var contentArea: some View {
-        switch file.fileType {
+        switch effectiveType {
         case .image:
             PhotoPreviewView(contentReader: contentReader)
         case .video:
@@ -75,10 +89,58 @@ struct PreviewView: View {
                 .foregroundStyle(.secondary)
             Text("No preview available for this file type.")
                 .foregroundStyle(.secondary)
+
+            // For unknown/other files (e.g. a renamed extension), offer to identify by content.
+            Button {
+                Task { await identify() }
+            } label: {
+                Label("Identify file type", systemImage: "sparkle.magnifyingglass")
+            }
+            .disabled(identifying)
+            .help("Inspect the file's actual contents to detect its real format, ignoring its name")
+
+            if identifying {
+                ProgressView().controlSize(.small)
+            }
+            if let identifyMessage {
+                Text(identifyMessage)
+                    .font(.caption)
+                    .multilineTextAlignment(.center)
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal)
+            }
+
             Text("You can still recover it to disk using the Recover button.")
                 .font(.caption)
                 .foregroundStyle(.tertiary)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    /// Reads the file's leading bytes and runs content-based type detection. On a previewable
+    /// match, `detected` is set and `contentArea` re-routes to the right viewer; otherwise we show
+    /// what it looks like (or that it couldn't be identified).
+    private func identify() async {
+        identifying = true
+        identifyMessage = nil
+        defer { identifying = false }
+        do {
+            let head = try await contentReader.readAll(maxLength: 16 * 1024)
+            let bytes = head.withUnsafeBytes { Array($0) }
+            head.wipe()
+            guard let match = FileTypeSniffer.detect(bytes) else {
+                identifyMessage = "Couldn't identify this file from its contents — it doesn't match a known format."
+                return
+            }
+            switch match.fileType {
+            case .image, .video, .audio, .document, .text:
+                detected = match // triggers a re-render into the matching preview
+            default:
+                identifyMessage = "Looks like \(match.displayName). It can't be previewed here, "
+                    + "but you can recover it and open it in the right app."
+            }
+        } catch {
+            identifyMessage = "Couldn't read the file: \(error.localizedDescription)"
+        }
     }
 }

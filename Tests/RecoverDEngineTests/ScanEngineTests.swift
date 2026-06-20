@@ -109,6 +109,52 @@ struct ScanEngineTests {
         await engine.clear()
     }
 
+    @Test("RIFF carving sizes from the header, types AVI/WAV, and drops bogus forms")
+    func carveRIFFContainers() async throws {
+        let size = 300_000
+        var bytes = [UInt8](repeating: 0, count: size)
+
+        func writeRIFF(at offset: Int, form: String, payload: UInt32) {
+            bytes.replaceSubrange(offset..<offset + 4, with: Array("RIFF".utf8))
+            bytes[offset + 4] = UInt8(payload & 0xFF)
+            bytes[offset + 5] = UInt8((payload >> 8) & 0xFF)
+            bytes[offset + 6] = UInt8((payload >> 16) & 0xFF)
+            bytes[offset + 7] = UInt8((payload >> 24) & 0xFF)
+            bytes.replaceSubrange(offset + 8..<offset + 12, with: Array(form.utf8))
+        }
+
+        let aviOffset = 10_000, aviPayload: UInt32 = 40_000           // file = payload + 8
+        let wavOffset = 60_000, wavPayload: UInt32 = 5_000
+        let bogusOffset = 80_000                                       // unrecognized form → dropped
+        writeRIFF(at: aviOffset, form: "AVI ", payload: aviPayload)
+        writeRIFF(at: wavOffset, form: "WAVE", payload: wavPayload)
+        writeRIFF(at: bogusOffset, form: "XXXX", payload: 1_000)
+
+        let reader = InMemoryBlockReader(bytes)
+        let device = DeviceInfo(
+            id: DeviceID("t"), displayName: "t", bsdName: "x", devicePath: "/x", rawPath: "/x",
+            totalSize: Int64(size), blockSize: 512, isRemovable: true, isExternal: true
+        )
+
+        let engine = ScanEngine()
+        await engine.startScan(device: device, mode: .deep, reader: reader)
+        let stream = await engine.subscribeProgress()
+        for await update in stream where update.phase == .complete { break }
+        let files = await engine.snapshot().files
+
+        let avi = try #require(files.first { $0.byteOffset == Int64(aviOffset) })
+        #expect(avi.fileType == .video)
+        #expect(avi.size == Int64(aviPayload) + 8)
+
+        let wav = try #require(files.first { $0.byteOffset == Int64(wavOffset) })
+        #expect(wav.fileType == .audio)
+        #expect(wav.size == Int64(wavPayload) + 8)
+
+        // The unrecognized RIFF form is not carved at all.
+        #expect(!files.contains { $0.byteOffset == Int64(bogusOffset) })
+        await engine.clear()
+    }
+
     @Test("Quick scan with unknown FS yields no files and still completes")
     func quickScanUnknownFS() async throws {
         let reader = InMemoryBlockReader([UInt8](repeating: 0, count: 4096))

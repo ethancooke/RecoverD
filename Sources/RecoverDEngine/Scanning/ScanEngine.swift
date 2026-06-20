@@ -197,8 +197,10 @@ public actor ScanEngine {
             // We can't resolve footer-bounded sizes here because that needs async reads, so we
             // gather the validated offsets and size them after the buffer access closes.
             let base = offset
-            let hits: [(signature: FileSignature, offset: Int64)] = chunk.withUnsafeBytes { buf in
+            let (hits, riffFiles): ([(signature: FileSignature, offset: Int64)], [RecoverableFile]) =
+            chunk.withUnsafeBytes { buf in
                 var found: [(FileSignature, Int64)] = []
+                var riff: [RecoverableFile] = []
                 for signature in carver.signatures {
                     var cursor = 0
                     while cursor < buf.count {
@@ -206,6 +208,22 @@ public actor ScanEngine {
                             break
                         }
                         cursor = rel + 1
+                        let absolute = base + Int64(rel)
+
+                        // Self-describing container (RIFF): parse the header here to size + type it,
+                        // and drop hits whose form type we don't recognize (false positives).
+                        if signature.container == .riff {
+                            // Need the 12-byte header; if it spills past the chunk, the overlap retries.
+                            guard rel + 12 <= buf.count else { continue }
+                            guard seenOffsets.insert(absolute).inserted else { continue }
+                            if let file = parseRIFFFile(in: buf, at: rel, absolute: absolute,
+                                                        total: total, signature: signature,
+                                                        carver: carver, deviceID: device.id) {
+                                riff.append(file)
+                            }
+                            continue
+                        }
+
                         // Validate the byte after the magic when the signature demands it. If the
                         // magic lands at the very end of the chunk the follow byte isn't available
                         // yet — skip without recording it so the next (overlapping) chunk retries.
@@ -214,15 +232,19 @@ public actor ScanEngine {
                             guard followIdx < buf.count else { continue }
                             guard followSet.contains(buf[followIdx]) else { continue }
                         }
-                        let absolute = base + Int64(rel)
                         if seenOffsets.insert(absolute).inserted {
                             found.append((signature, absolute))
                         }
                     }
                 }
-                return found
+                return (found, riff)
             }
             chunk.wipe()
+
+            for file in riffFiles {
+                files.append(file)
+                progress.filesFound = files.count
+            }
 
             // Second pass: resolve each hit's real size by locating its footer, then record it.
             for hit in hits {
@@ -340,6 +362,26 @@ public actor ScanEngine {
         }
         return nil
     }
+}
+
+/// Parses a RIFF header at `rel` within `buf` (which must hold at least `rel + 12` bytes) into a
+/// `RecoverableFile`, or returns nil if the form type isn't recognized (a false positive). The
+/// file is sized from the RIFF payload-size field when that value is sane, otherwise capped.
+private func parseRIFFFile(in buf: UnsafeRawBufferPointer, at rel: Int, absolute: Int64,
+                           total: Int64, signature: FileSignature,
+                           carver: SignatureFileCarver, deviceID: DeviceID) -> RecoverableFile? {
+    let formBytes = [buf[rel + 8], buf[rel + 9], buf[rel + 10], buf[rel + 11]]
+    guard let formString = String(bytes: formBytes, encoding: .ascii),
+          let form = SignatureFileCarver.riffForm(formString) else { return nil }
+
+    // Payload size is a little-endian UInt32 at offset 4; the whole file is that + 8 (RIFF header).
+    let payload = UInt32(buf[rel + 4]) | (UInt32(buf[rel + 5]) << 8)
+        | (UInt32(buf[rel + 6]) << 16) | (UInt32(buf[rel + 7]) << 24)
+    let declared = Int64(payload) + 8
+    let cap = min(signature.maxExpectedSize, total - absolute)
+    let size = (declared >= 16 && declared <= cap) ? declared : cap
+
+    return carver.makeContainerFile(form: form, offset: absolute, size: size, deviceID: deviceID)
 }
 
 private func findMagic(in buf: UnsafeRawBufferPointer, magic: [UInt8], from start: Int) -> Int? {

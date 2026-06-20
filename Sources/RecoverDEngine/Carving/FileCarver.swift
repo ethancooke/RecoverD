@@ -1,6 +1,14 @@
 import Foundation
 import RecoverDCore
 
+/// A container format whose header is self-describing — the carver parses it to bound the file
+/// and refine its type rather than relying on a footer/size cap.
+public enum ContainerKind: Sendable, Hashable {
+    /// RIFF (`RIFF` magic): bytes 4–7 are the little-endian payload size; bytes 8–11 are the form
+    /// type (`AVI `, `WAVE`, `WEBP`, …).
+    case riff
+}
+
 /// A recognizable file signature (magic bytes) used for carving.
 public struct FileSignature: Sendable, Hashable {
     public let magic: [UInt8]
@@ -16,12 +24,17 @@ public struct FileSignature: Sendable, Hashable {
     /// random/compressed data: a real JPEG's 4th byte is always a valid segment marker.
     public let headerFollowSet: Set<UInt8>?
 
+    /// When set, the engine parses the container header to size the file and refine its type,
+    /// instead of using `footer`/`maxExpectedSize`.
+    public let container: ContainerKind?
+
     public init(magic: [UInt8],
                 fileExtension: String,
                 fileType: RecoverableFileType,
                 maxExpectedSize: Int64,
                 footer: [UInt8]? = nil,
                 headerFollowSet: Set<UInt8>? = nil,
+                container: ContainerKind? = nil,
                 displayName: String) {
         self.magic = magic
         self.fileExtension = fileExtension
@@ -29,6 +42,7 @@ public struct FileSignature: Sendable, Hashable {
         self.maxExpectedSize = maxExpectedSize
         self.footer = footer
         self.headerFollowSet = headerFollowSet
+        self.container = container
         self.displayName = displayName
     }
 }
@@ -82,9 +96,12 @@ public struct SignatureFileCarver: FileCarver {
             FileSignature(magic: [0x50, 0x4B, 0x03, 0x04],
                           fileExtension: "zip", fileType: .archive,
                           maxExpectedSize: 4 * 1024 * 1024 * 1024, displayName: "ZIP archive"),
+            // RIFF container (AVI / WAV / WebP). The engine parses the header to size it and pick
+            // the real type; a hit with no recognized form type is rejected as a false positive.
             FileSignature(magic: [0x52, 0x49, 0x46, 0x46],
                           fileExtension: "avi", fileType: .video,
-                          maxExpectedSize: 4 * 1024 * 1024 * 1024, displayName: "RIFF (AVI/WAV)"),
+                          maxExpectedSize: 4 * 1024 * 1024 * 1024,
+                          container: .riff, displayName: "RIFF (AVI/WAV)"),
             // ID3v2 tag: "ID3" followed by a major-version byte (2, 3, or 4). Validating it keeps
             // this 3-byte magic from matching arbitrary "ID3" runs in binary data.
             FileSignature(magic: [0x49, 0x44, 0x33],
@@ -126,6 +143,45 @@ public struct SignatureFileCarver: FileCarver {
             // a bare magic match capped at the maximum size.
             confidence: footerFound ? 0.85 : 0.5,
             signatureMatch: signature.displayName
+        )
+    }
+
+    /// A recognized RIFF form: the real extension, type, and human label for a form-type code.
+    public struct RIFFForm: Sendable, Hashable {
+        public let fileExtension: String
+        public let fileType: RecoverableFileType
+        public let displayName: String
+    }
+
+    /// Maps a 4-character RIFF form type (bytes 8–11) to a known media type, or nil if it isn't
+    /// one we recognize — which lets the carver drop random `RIFF` false positives.
+    public static func riffForm(_ formType: String) -> RIFFForm? {
+        switch formType {
+        case "AVI ": return RIFFForm(fileExtension: "avi", fileType: .video, displayName: "AVI video")
+        case "WAVE": return RIFFForm(fileExtension: "wav", fileType: .audio, displayName: "WAV audio")
+        case "WEBP": return RIFFForm(fileExtension: "webp", fileType: .image, displayName: "WebP image")
+        default: return nil
+        }
+    }
+
+    /// Builds a `RecoverableFile` for a parsed container (RIFF) hit, using the form's real
+    /// extension/type and the header-derived size.
+    public func makeContainerFile(form: RIFFForm,
+                                  offset: Int64,
+                                  size: Int64,
+                                  deviceID: DeviceID) -> RecoverableFile {
+        RecoverableFile(
+            id: FileID("carved:\(offset):\(form.fileExtension)"),
+            displayName: "recovered_\(offset).\(form.fileExtension)",
+            originalPath: nil,
+            fileType: form.fileType,
+            size: max(0, size),
+            byteOffset: offset,
+            allocationStatus: .orphaned,
+            sourceDeviceID: deviceID,
+            // Valid form type + self-describing size ⇒ high confidence it's a real file.
+            confidence: 0.85,
+            signatureMatch: form.displayName
         )
     }
 }
