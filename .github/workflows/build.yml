@@ -1,0 +1,55 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Superseded pushes / PR updates cancel in-flight runs (saves macOS minutes).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build-test:
+    name: Build & test (Apple Silicon)
+    runs-on: macos-15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: |
+          set -o pipefail
+          xcodebuild -version
+          swift --version
+
+      - name: Build (debug)
+        run: |
+          set -o pipefail
+          swift build
+
+      - name: Build (release)
+        run: |
+          set -o pipefail
+          swift build -c release
+
+      - name: Test
+        run: |
+          set -o pipefail
+          swift test
+
+      - name: Verify the binary is arm64-only
+        run: |
+          set -o pipefail
+          BIN=.build/release/RecoverDApp
+          file "$BIN"
+          if lipo -archs "$BIN" | grep -qw x86_64; then
+            echo "::error::RecoverDApp contains an x86_64 slice; this project is Apple Silicon only."
+            exit 1
+          fi
+          lipo -archs "$BIN"

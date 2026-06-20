@@ -38,7 +38,10 @@ reformatted drives). We assume:
 | Thumbnails / previews             | RAM (`NSImage`)    | Never                           |
 | Preview source bytes              | RAM (`SecureData`) | Never (wiped after render)      |
 | Recovered file **contents**       | RAM (`SecureData`) | **Only on explicit Export**     |
-| Disk image (.dmg/.raw)            | destination file   | **Only on explicit Image action**|
+
+The source device is **never imaged or copied** to the host. Raw blocks are read on demand
+through `RawFDReader`/`CachingBlockReader` and held only in RAM; `ExportManager` is the single
+code path that writes any recovered bytes to disk, and only to a user-chosen destination.
 
 ## SecureData
 
@@ -56,19 +59,25 @@ persisted.
 ## Raw disk access & App Sandbox (the hard part)
 
 **App Sandbox forbids opening `/dev/disk*` / `/dev/rdisk*`.** A sandboxed GUI cannot do raw
-recovery. RecoverD therefore splits the process:
+recovery, so RecoverD separates *device discovery* (no privilege) from *raw reads* (privileged).
 
-- **GUI app** — sandboxed + hardened runtime. Discovers devices (IOKit/DiskArbitration, which
-  needs no privilege) but never opens `/dev`. Talks to the helper over XPC.
-- **Privileged helper daemon** — registered via `SMAppService` (macOS 13+). Hardened, **not**
-  sandboxed. Performs raw reads on behalf of the GUI. Installed/updated through `SMAppService`
-  with user consent.
+**Today (current build):** the GUI runs **non-sandboxed** and obtains a read-only file descriptor
+to `/dev/rdisk*` via `authopen` — macOS's standard admin-authorization helper — which hands the
+open descriptor back over a Unix-domain socket (`SCM_RIGHTS`) after one admin prompt. Reads then
+use `pread` straight into wiped `SecureData` (`RawFDReader`), so the device is never copied to the
+host and never fully buffered. Device discovery still uses IOKit/DiskArbitration, which needs no
+privilege.
+
+**Planned (hardening target):** split the process into a sandboxed + hardened GUI and a
+**privileged helper daemon** registered via `SMAppService` (macOS 13+) — hardened, **not**
+sandboxed — performing raw reads on behalf of the GUI over XPC, installed/updated with user
+consent. `PrivilegedDiskAccess.swift` holds the `@objc` XPC protocol scaffold for this.
 
 Distribution is therefore **outside the Mac App Store** (notarized direct distribution), since
 App Store apps must be sandboxed and cannot ship a privileged helper of this kind.
 
-`RawBlockReader` abstracts both paths, so the engine runs unchanged against image files (tests,
-no privilege) and real devices (helper).
+`RawBlockReader` abstracts every path, so the engine runs unchanged against image files (tests,
+no privilege), the current `authopen` descriptor, and the future helper.
 
 ## Entitlements (see `Resources/`)
 

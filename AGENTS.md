@@ -18,6 +18,10 @@ There is no separate linter configured yet. Type/safety checking is done via the
 compiler in strict concurrency mode (`swift build`). Always ensure `swift build` and
 `swift test` pass before finishing a task.
 
+> **Carving speed:** the deep/carving scan is byte-scanning hot-path code. A **debug** build
+> carves at roughly 1 MB/s; a **release** build (`swift build -c release`) is ~700× faster. Test
+> deep scans against real-size media with a release build, or you'll think the scanner hung.
+
 ## Conventions
 
 - Swift 6 strict concurrency: prefer `actor` for mutable engine state; make model types
@@ -31,12 +35,17 @@ compiler in strict concurrency mode (`swift build`). Always ensure `swift build`
 ## Layout cheat sheet
 
 - `Sources/RecoverDCore` — dependency-free shared types + `SecureData`.
-- `Sources/RecoverDEngine` — device discovery, parsers, carver, scan engine, imaging, export.
-- `Sources/RecoverDApp` — SwiftUI app + views + `@Observable` view model.
-- `docs/` — architecture + security model. `Resources/` — plist/entitlements for the Xcode wrapper.
+- `Sources/RecoverDEngine` — device discovery, raw readers, parsers, carver + content sniffer,
+  scan engine, export (no `SwiftUI`/`AppKit`).
+- `Sources/RecoverDApp` — SwiftUI app + views + `@Observable` view model + in-memory asset loader.
+- `docs/` — architecture + security model. `Resources/` — plist/entitlements + app icon for the
+  Xcode wrapper.
 
 ## Raw disk access
 
-App Sandbox forbids `/dev/disk*` access. The GUI stays sandboxed; raw reads go through a
-privileged helper daemon (`SMAppService`). The engine is abstracted over `RawBlockReader` so it
-runs equally against `.dmg`/raw image files (tests) and real devices (helper).
+App Sandbox forbids `/dev/disk*` access. Today the GUI runs non-sandboxed and obtains a read-only
+fd to `/dev/rdisk*` via `authopen` (one admin prompt), read with `pread` through `RawFDReader` —
+no copy to host storage. The planned hardening target is a sandboxed GUI + `SMAppService`
+privileged helper daemon doing raw reads over XPC (`PrivilegedDiskAccess.swift` is the scaffold).
+The engine is abstracted over `RawBlockReader` so it runs equally against `.dmg`/raw image files
+(`URLBlockReader`, tests, no privilege) and real devices.

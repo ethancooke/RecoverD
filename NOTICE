@@ -1,0 +1,31 @@
+RecoverD
+Copyright 2026 RecoverD contributors
+
+This product is licensed under the Apache License, Version 2.0 (the "License"); you may not use
+this product except in compliance with the License. A copy of the License is in the LICENSE file
+and at http://www.apache.org/licenses/LICENSE-2.0.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, express or implied (see Apache
+License sections 7-8). RecoverD performs low-level reads of storage devices; the authors disclaim
+liability for data loss or device damage. Recovery is best-effort and never a substitute for
+backups.
+
+----------------------------------------------------------------------
+Third-party code
+----------------------------------------------------------------------
+
+RecoverD bundles no third-party source or binary dependencies. It links only against Apple system
+frameworks (Foundation, SwiftUI, AppKit, AVFoundation, ImageIO, PDFKit, IOKit, DiskArbitration)
+and uses the macOS system tool `authopen` for authorized device access.
+
+----------------------------------------------------------------------
+Acknowledgements
+----------------------------------------------------------------------
+
+The file-system parsers and signature carver are implemented from public format documentation
+(Microsoft exFAT/FAT specifications, the ISO base media file format, Matroska/EBML, TIFF, and
+published camera-RAW and container layouts). No third-party measurement data, sample files, or
+proprietary code are redistributed.
+
+Planned: an APFS bridge via libfsapfs (https://github.com/libyal/libfsapfs, GNU LGPL v3+). It is
+not yet integrated; this notice will be updated when it is.

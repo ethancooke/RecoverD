@@ -8,20 +8,25 @@ SwiftUI-first UI; AppKit only where SwiftUI is insufficient (file panels, thumbn
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
 │ RecoverDApp  (executable target — SwiftUI + AppKit)                  │
-│   RecoverDApp (@main App) · ContentView                              │
-│   Views: DevicePicker · ScanProgress · ResultBrowser · Export        │
+│   RecoverDApp (@main App + quit-wipe delegate) · ContentView         │
+│   Views: DevicePicker · ScanProgress · ResultBrowser · Preview       │
+│          (Photo/Video/PDF/Text) · Export                              │
 │   ViewModels: RecoverySessionViewModel (@Observable, @MainActor)     │
+│   Support: InMemoryAssetLoader (streamed AVFoundation preview)       │
 └───────────────────────────────▲──────────────────────────────────────┘
                                 │  async calls + AsyncStream<ScanProgress>
                                 │  (metadata + thumbnails only; never content on disk)
 ┌───────────────────────────────┴──────────────────────────────────────┐
 │ RecoverDEngine  (library target — UI-agnostic, no SwiftUI/AppKit)     │
 │   Devices:  DeviceDiscovery · RawBlockReader · URLBlockReader         │
-│             PrivilegedDiskAccess (XPC helper protocol, SMAppService)   │
-│   Filesystems: FilesystemParser + exFAT/FAT32/APFS/HFS+ (APFS→libfsapfs)│
-│   Carving:   FileCarver · SignatureFileCarver                        │
-│   Scanning:  ScanEngine (actor) — owns mutable session state          │
-│   Imaging:   DiskImager   (explicit user write — .dmg/.raw)           │
+│             PrivilegedRawDevice (authopen fd) · RawFDReader (pread)   │
+│             CachingBlockReader · MountedFileReader                    │
+│             PrivilegedDiskAccess (XPC helper protocol — scaffold)     │
+│   Filesystems: FilesystemParser + exFAT/FAT12-16-32 (impl)            │
+│                APFS/HFS+ (stubs; APFS→libfsapfs)                      │
+│   Carving:   FileCarver · SignatureFileCarver · FileTypeSniffer       │
+│   Scanning:  ScanEngine (actor) + MountedVolumeScanner — own state    │
+│   Support:   ContentReader · FileContentReader · Errors · FS helpers  │
 │   Export:    ExportManager (explicit user write — the only content    │
 │              path that writes to the Mac)                             │
 └───────────────────────────────▲──────────────────────────────────────┘
@@ -29,6 +34,7 @@ SwiftUI-first UI; AppKit only where SwiftUI is insufficient (file panels, thumbn
 ┌───────────────────────────────┴──────────────────────────────────────┐
 │ RecoverDCore  (library target — dependency-free shared types)         │
 │   Models:   DeviceInfo · RecoverableFile · ScanResult · ScanProgress  │
+│             ByteRange                                                  │
 │   Security: SecureData (zeroed-on-free byte buffer)                   │
 └──────────────────────────────────────────────────────────────────────┘
 ```
@@ -36,23 +42,23 @@ SwiftUI-first UI; AppKit only where SwiftUI is insufficient (file panels, thumbn
 ## Data-flow: the in-memory sandbox
 
 The defining rule: **scanning and previewing never write recovered content to the Mac.** Only
-the explicit Export (and the explicit Disk Image) actions write, and only to a user-chosen
-destination.
+the explicit Export ("Recover to Disk") action writes, and only to a user-chosen destination.
+The source device is never imaged or copied to the host.
 
 ```mermaid
 flowchart TD
     DEV["External device<br/>/dev/rdisk* or .dmg image"]
-    HELPER["Privileged helper daemon<br/>(SMAppService, non-sandboxed)<br/>raw block reads over XPC"]
-    READER["RawBlockReader<br/>(URLBlockReader or helper-backed)"]
+    AUTHOPEN["authopen + pread<br/>(one admin prompt, SCM_RIGHTS fd)<br/>RawFDReader — no copy to host"]
+    READER["RawBlockReader<br/>(URLBlockReader or RawFDReader)<br/>+ CachingBlockReader session cache"]
     ENGINE["ScanEngine actor<br/>(RAM only)"]
     META["RecoverableFile metadata<br/>+ thumbnails (RAM)"]
     PREVIEW["On-demand preview<br/>read bytes → SecureData → render → wipe"]
     USER["User reviews in-memory results"]
-    EXPORT{"Explicit<br/>Recover / Save?"}
+    EXPORT{"Explicit<br/>Recover to Disk?"}
     DISK["User-chosen destination<br/>on the Mac (written)"]
     CLEAR["Clear / Quit<br/>secure wipe of all RAM"]
 
-    DEV --> HELPER --> READER
+    DEV --> AUTHOPEN --> READER
     DEV -. "image file (no privilege)" .-> READER
     READER --> ENGINE
     ENGINE --> META
@@ -78,17 +84,20 @@ flowchart TD
 - `RecoverySessionViewModel` is `@MainActor @Observable`, bridging async engine updates into
   SwiftUI-reactive properties.
 
-## Why two write paths are acceptable
+## The single write path
 
-`ExportManager` and `DiskImager` both write to disk, but **both are explicit user actions** with
-a user-chosen destination:
+`ExportManager` is the **only** code that writes recovered content to the Mac, and it runs
+**only** as an explicit user action:
 
-- **Disk imaging** is the recommended *pre*-recovery safety step (a byte-for-byte copy to
-  another drive). It is opt-in.
-- **Export** requires the user to multi-select files and click "Recover to Disk".
+- The user multi-selects files in the result browser and clicks **Recover to Disk**, then
+  picks a destination folder.
+- Each file's bytes are read on demand into `SecureData`, written to the chosen destination,
+  and the `SecureData` is wiped immediately after.
 
-Neither runs automatically during scan/preview. This preserves the security invariant while
-still being a usable recovery tool.
+Nothing is written during scanning or previewing, and the source device is never imaged or
+copied to the host. This preserves the security invariant while still being a usable recovery
+tool. (An earlier `DiskImager` "byte-for-byte copy" path was removed precisely because it wrote
+device contents to the host outside this single, explicit export.)
 
 ## Engine ↔ raw access abstraction
 
@@ -97,10 +106,16 @@ still being a usable recovery tool.
 | Source                       | Implementation                        | Privilege?        |
 |------------------------------|---------------------------------------|-------------------|
 | `.dmg` / raw image file      | `URLBlockReader` (local `FileHandle`) | None              |
-| Real external `/dev/rdisk*`  | helper-backed reader (XPC)            | Privileged daemon |
+| Real external `/dev/rdisk*`  | `RawFDReader` over an `authopen` fd   | One admin prompt  |
 
-This makes the entire engine exercisable in tests against fixture images, and lets the
-privileged helper be developed independently.
+All reads pass through `CachingBlockReader` — a block-aligned, request-coalescing, FIFO-evicted
+session cache shared by the scan, previews, and export — so a previewed or exported file is
+usually served from RAM without re-reading the device.
+
+This makes the entire engine exercisable in tests against fixture images. The *planned* hardening
+target swaps the `authopen` path for an `SMAppService` privileged helper performing raw reads over
+XPC (`PrivilegedDiskAccess.swift` is the scaffold); the engine is unchanged either way, and the
+helper can be developed independently.
 
 ## Extension points (next steps)
 

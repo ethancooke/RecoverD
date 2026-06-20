@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/ethancooke/RecoverD/security/advisories/new
+    about: Report security issues privately via GitHub's vulnerability reporting, not a public issue. See SECURITY.md.
+  - name: Documentation
+    url: https://github.com/ethancooke/RecoverD#readme
+    about: The README, docs/ARCHITECTURE.md, and docs/SECURITY.md cover the workflow, supported formats, and security model.

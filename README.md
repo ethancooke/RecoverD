@@ -1,5 +1,10 @@
 # RecoverD
 
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+[![macOS 14+](https://img.shields.io/badge/macOS-14%2B-black?logo=apple)](#deployment-target)
+[![Apple Silicon](https://img.shields.io/badge/Apple_Silicon-arm64-black?logo=apple)](#highlights)
+[![Swift 6](https://img.shields.io/badge/Swift-6-orange?logo=swift)](Package.swift)
+
 > A secure, native macOS file-recovery tool for external storage, built for Apple Silicon.
 > **Nothing leaves the source drive until *you* choose to save it.**
 
@@ -13,11 +18,33 @@ being executed or persisted on the host.
 
 ## Status
 
-🚧 **Scaffold + exFAT/FAT32 parsers.** Architecture, security model, scan engine, file carving,
-the **exFAT parser** (live + deleted-file recovery, FAT-chain extents, recursive directory walk),
-and the **FAT12/16/32 parser** (BPB, FAT12/16/32 type detection, 8.3 + LFN decoding, 0xE5
-deleted-entry recovery) are implemented and tested. APFS / HFS+ parsers are stubs ready to be
-implemented (see [Next steps](#next-steps)).
+🚧 **Pre-release.** The core recovery workflow is implemented and tested end-to-end against fixture
+images and real external devices:
+
+- **File-system parsers**: **exFAT** (live + deleted-file recovery, FAT-chain extents, recursive
+  directory walk) and **FAT12/16/32** (BPB, FAT12/16/32 type detection, 8.3 + LFN decoding, `0xE5`
+  deleted-entry recovery). **APFS** and **HFS+** parsers are stubs (see [Next steps](#next-steps)).
+- **Deep / carving scan** with a broad signature table: JPEG, PNG, GIF, PDF, ZIP, RIFF (AVI/WAV/
+  WebP), MP3 (ID3 + raw frame sync), FLAC, Ogg, ISO-BMFF (MP4/MOV/M4A/HEIC), Matroska/WebM, MPEG
+  program stream, TIFF, and camera RAW (ORF, RW2, Fujifilm RAF, Sigma X3F, Canon CR2/CR3, plus
+  NEF/ARW/DNG via the TIFF path). Container formats are **sized from their headers** (IFDs, EBML
+  Segment size, RIFF/ISO-BMFF box chains, RAF header directory) rather than capped. "Try harder"
+  and "Include RAW" toggles trade recall for precision/speed.
+- **Content sniffing** (`FileTypeSniffer`) identifies files by their bytes when the name/extension
+  is missing or misleading, plus an in-app "Identify file type" action in the preview.
+- **In-app previews**: photo, video (streamed via an in-memory AVFoundation resource loader), PDF,
+  and text — all rendered from RAM.
+- **No-copy raw device reads** via `authopen` + `pread` (one admin prompt per session) — the device
+  is never imaged to `/tmp` or fully buffered. A session-level read cache is shared by the scan,
+  previews, and export.
+- **Quick + Deep scan**, **pause/resume/cancel**, progress reporting, results sorting (size/name/
+  type), low-confidence carve flagging, and a clear "in RAM vs. on disk" indicator.
+- **Secure wipe** of all in-memory recovery data on clear/quit.
+
+Not yet built: the APFS (`libfsapfs`) and HFS+ parsers, the sandboxed `SMAppService` privileged
+helper (the current raw path uses `authopen` and a non-sandboxed GUI — see [Raw disk
+access](#raw-disk-access-on-macos-read-this)), the Xcode app-project wrapper / signing /
+notarization, and security-scoped bookmarks for the export destination.
 
 ---
 
@@ -37,9 +64,17 @@ pairs a privileged low-level engine with a SwiftUI UI. Keep as-is.
 - **In-memory sandbox**: metadata, thumbnails, and previews live in RAM and are securely wiped
   on clear/quit. File *contents* are never written to disk without an explicit Save.
 - **Quick scan** (file-system metadata) and **Deep / carving scan** (reformatted/corrupted media).
-- **exFAT, FAT32, APFS (read-only), HFS+** parsing planned; **exFAT + FAT12/16/32 implemented**; APFS via `libfsapfs` bridging.
-- **Disk imaging**: byte-for-byte `.dmg`/raw image as a recommended pre-recovery safety step.
-- **Pause/resume** scanning, progress reporting, and a clear "in RAM vs. on disk" indicator.
+- **File-system parsing**: **exFAT + FAT12/16/32 implemented**; APFS (via `libfsapfs` bridging) and
+  HFS+ planned.
+- **Signature carving** of JPEG, PNG, GIF, PDF, ZIP, RIFF, MP3, FLAC, Ogg, MP4/MOV/M4A/HEIC,
+  Matroska/WebM, MPEG, TIFF, and camera RAW — header-sized where possible, with "Try harder" and
+  "Include RAW" toggles.
+- **Content sniffing** that types files by their bytes when the name/extension is wrong or missing.
+- **In-app previews** for photos, video, PDF, and text — streamed from RAM, never written to disk.
+- **No-copy raw device reads** (`authopen` + `pread`, one admin prompt) — the source drive is never
+  imaged to your Mac. Image-file (`.dmg`/raw) scanning needs no privilege at all.
+- **Pause/resume/cancel**, progress reporting, results sorting, low-confidence carve flagging, and a
+  clear "in RAM vs. on disk" indicator.
 - **Swift Package Manager** layout; openable in Xcode (`xed .`) or buildable from the CLI.
 
 ---
@@ -52,8 +87,9 @@ pairs a privileged low-level engine with a SwiftUI UI. Keep as-is.
 4. **Explicit export** is the *only* path that writes recovered file bytes to the Mac, to a
    user-chosen destination.
 5. **Secure wipe** of all in-memory recovery data on clear or quit.
-6. **Hardened runtime + notarization-ready**; raw block access via a *privileged helper daemon*
-   (the GUI stays sandboxed).
+6. **Hardened runtime + notarization-ready**. Raw block access today goes through `authopen`
+   (one admin prompt) with a non-sandboxed GUI; the planned end state is a sandboxed GUI plus a
+   privileged `SMAppService` helper daemon (see [Raw disk access](#raw-disk-access-on-macos-read-this)).
 
 See [`docs/SECURITY.md`](docs/SECURITY.md) for the full threat model and
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the in-memory sandboxing flow.
@@ -79,32 +115,45 @@ See [`docs/SECURITY.md`](docs/SECURITY.md) for the full threat model and
 RecoverD/
 ├── Package.swift                  # SPM manifest (Swift 6, macOS 14+)
 ├── README.md                      # this file
+├── CONTRIBUTING.md                # how to contribute + pre-PR quality gates
+├── SECURITY.md                    # how to report a vulnerability (→ docs/SECURITY.md)
+├── PRIVACY.md                     # what RecoverD does (and doesn't) collect
+├── NOTICE                         # copyright + third-party notices
 ├── LICENSE                        # Apache 2.0
-├── AGENTS.md                      # build/lint/test commands for AI tooling
+├── AGENTS.md                      # build/test commands + conventions for AI tooling
 ├── .gitignore
+├── .github/                       # CI workflow, issue/PR templates, dependabot
 ├── docs/
 │   ├── ARCHITECTURE.md            # layering + in-memory sandbox (Mermaid)
-│   └── SECURITY.md                # threat model, raw-disk access, entitlements
+│   └── SECURITY.md                # full threat model, raw-disk access, entitlements
 ├── Resources/
 │   ├── Info.plist                 # app bundle metadata (for Xcode wrapper)
-│   ├── Entitlements.app.plist     # sandboxed GUI entitlements
-│   └── Entitlements.helper.plist  # non-sandboxed privileged helper entitlements
+│   ├── Entitlements.app.plist     # sandboxed GUI entitlements (target state)
+│   ├── Entitlements.helper.plist  # non-sandboxed privileged helper entitlements
+│   ├── AppIcon.icns               # app icon
+│   └── AppIcon-source-1024.png
 ├── Sources/
 │   ├── RecoverDApp/               # @main SwiftUI app (executable target)
-│   │   ├── RecoverDApp.swift
+│   │   ├── RecoverDApp.swift      #   App + quit-wipe delegate
 │   │   ├── ContentView.swift
-│   │   ├── Views/                 # device picker, progress, browser, export
-│   │   └── ViewModels/            # @Observable session view model
+│   │   ├── Views/                 # device picker, scan progress, result browser,
+│   │   │                          # preview (photo/video/PDF/text), export
+│   │   ├── ViewModels/            # @Observable RecoverySessionViewModel
+│   │   └── Support/               # InMemoryAssetLoader (streamed AVFoundation preview)
 │   ├── RecoverDCore/              # shared, dependency-free types (library)
-│   │   ├── Models/                # DeviceInfo, RecoverableFile, ScanResult
-│   │   └── Security/              # SecureData (zeroed-on-free memory)
-│   └── RecoverDEngine/            # recovery engine (library)
-│       ├── Devices/               # discovery + raw block reader (+ helper protocol)
-│       ├── Filesystems/           # parser protocol + exFAT/FAT32/APFS/HFS+ stubs
-│       ├── Carving/               # file carving protocol + stub
-│       ├── Scanning/              # ScanEngine actor
-│       ├── Imaging/               # disk imaging
-│       └── Export/                # safe export workflow
+│   │   ├── Models/                # DeviceInfo, RecoverableFile, ScanResult, ByteRange
+│   │   └── Security/              # SecureData (zeroed-on-free byte buffer)
+│   └── RecoverDEngine/            # recovery engine (library — no SwiftUI/AppKit)
+│       ├── Devices/               # discovery, RawBlockReader, URLBlockReader,
+│       │                          # PrivilegedRawDevice (authopen) + RawFDReader (pread),
+│       │                          # CachingBlockReader, MountedFileReader, PrivilegedDiskAccess
+│       │                          # (XPC helper protocol scaffold)
+│       ├── Filesystems/           # parser protocol + exFAT/FAT12-16-32 (implemented),
+│       │                          # APFS/HFS+ stubs
+│       ├── Carving/               # FileCarver (signature table) + FileTypeSniffer
+│       ├── Scanning/              # ScanEngine actor + MountedVolumeScanner
+│       ├── Support/               # content readers, errors, FS helpers
+│       └── Export/                # ExportManager (the only content write path)
 └── Tests/
     ├── RecoverDCoreTests/
     └── RecoverDEngineTests/
@@ -136,41 +185,66 @@ xed .                        # opens the Swift Package in Xcode
 ## Raw disk access on macOS (read this)
 
 Reading `/dev/disk*` / `/dev/rdisk*` requires privileges that **App Sandbox forbids**. RecoverD
-therefore splits responsibilities:
+handles this in two stages:
 
-- **GUI app** — sandboxed, hardened runtime. Never touches `/dev` directly.
-- **Privileged helper daemon** (via `SMAppService`, macOS 13+) — non-sandboxed, hardened,
-  registered with the system. Performs raw block reads over XPC. Installed/updated through
-  `SMAppService.daemon(plistName:)`.
+**Today (current build):** the GUI obtains a read-only file descriptor to `/dev/rdisk*` via
+`authopen` — macOS's standard admin-authorization helper — which hands the open descriptor back
+over a Unix-domain socket (`SCM_RIGHTS`) after one admin prompt. Reads then use `pread` straight
+into wiped `SecureData`, so the device is **never copied to your Mac's storage** and never fully
+buffered in memory. This path requires the GUI to run **non-sandboxed** (which the `swift run` CLI
+build does); the `Resources/Entitlements.app.plist` sandbox setting is the *target* for the helper
+world below, not the current runtime posture.
+
+**Planned (hardening target):** a sandboxed GUI plus a **privileged helper daemon** registered via
+`SMAppService` (macOS 13+) — non-sandboxed, hardened, performing raw block reads over XPC. This
+restores a sandboxed GUI. `Sources/RecoverDEngine/Devices/PrivilegedDiskAccess.swift` holds the
+`@objc` XPC protocol scaffold for this; wiring `SMAppService.daemon(plistName:)` + `NSXPCListener`
+is a tracked next step.
 
 The engine is abstracted behind `RawBlockReader` so it works identically against:
-- a `.dmg`/raw **image file** (no privilege needed — great for tests), and
-- a **real device** (backed by the privileged helper).
 
-See `Sources/RecoverDEngine/Devices/BlockDeviceReader.swift` and
-`Sources/RecoverDEngine/Devices/PrivilegedDiskAccess.swift`.
+- a `.dmg`/raw **image file** — `URLBlockReader` (local `FileHandle`, no privilege needed; great
+  for tests), and
+- a **real device** — `RawFDReader` over an `authopen` descriptor today (helper-backed XPC reader
+  once the daemon lands).
+
+See `Sources/RecoverDEngine/Devices/BlockDeviceReader.swift` (`RawBlockReader` + `URLBlockReader`),
+`Sources/RecoverDEngine/Devices/PrivilegedRawDevice.swift` (`authopen` fd passing),
+`Sources/RecoverDEngine/Devices/RawFDReader.swift` (block-aligned `pread`), and
+`Sources/RecoverDEngine/Devices/PrivilegedDiskAccess.swift` (the XPC helper scaffold).
 
 ---
 
 ## Next steps
 
 1. **Xcode app-project wrapper** for signing/entitlements/notarization + the privileged helper.
-2. **Implement `libfsapfs` bridge** (SwiftPM binary target or system-library wrapper + Clifft).
-3. **Basic HFS+** parser; validate against fixture images.
-4. **File carving** refinements: footer-based size detection, more signatures (already works for JPEG/PNG/GIF/PDF/ZIP/RIFF/MP3).
-5. **Privileged helper (SMAppService)** + XPC `RawBlockReader` against `/dev/rdisk*`.
-6. **Security-scoped bookmarks** for the export destination (re-access across launches).
-7. **Thumbnails/previews** that stream from the device, render, and immediately drop source bytes.
-8. **Pause/resume** + checkpointing of *scan position only* (never content) to allow long scans.
-9. **Notarization** CI (GitHub Actions: `notarytool` + `stapler`).
+2. **`libfsapfs` bridge** (SwiftPM binary target or system-library wrapper) so `APFSParser`
+   enumerates live + deleted files instead of returning empty.
+3. **Basic HFS+** parser (catalog B-tree); validate against fixture images.
+4. **Sandboxed GUI + `SMAppService` privileged helper** (XPC `RawBlockReader` against
+   `/dev/rdisk*`), replacing the current `authopen` path so the GUI can run sandboxed.
+5. **Security-scoped bookmarks** for the export destination (re-access across launches).
+6. **Scan-position checkpointing** (pause/resume already works; checkpointing *position only* —
+   never content — would let long scans survive an app restart).
+7. **`MemoryHygiene` service** that registers every `SecureData` holder for deterministic
+   zero-on-quit (today's quit-wipe is best-effort).
+8. **Carving refinements**: footer/structure-based sizing for the remaining best-guess formats
+   (GIF/ZIP/MP3/FLAC/Ogg/MPEG), plus more signatures.
+9. **Notarization CI** (GitHub Actions: `notarytool` + `stapler`).
+
+Already landed: exFAT + FAT12/16/32 parsing, signature carving for the formats listed in
+[Highlights](#highlights), content sniffing, in-app previews, no-copy `authopen` raw reads, the
+session read cache, pause/resume/cancel, results sorting, and low-confidence carve flagging.
 
 ---
 
 ## Contributing
 
-Contributions welcome. By contributing you agree your contributions are licensed under the
-Apache 2.0 license. Please open an issue first for non-trivial changes.
+Contributions welcome — see [`CONTRIBUTING.md`](CONTRIBUTING.md) for build/test commands, the
+pre-PR quality gates, and the conventions (security model, engine/UI split, no comments). By
+contributing you agree your contributions are licensed under the Apache 2.0 license. Please open
+an issue first for non-trivial changes. To report a security issue, see [`SECURITY.md`](SECURITY.md).
 
 ## License
 
-Apache License 2.0 — see [`LICENSE`](LICENSE).
+Apache License 2.0 — see [`LICENSE`](LICENSE) and [`NOTICE`](NOTICE).
