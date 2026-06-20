@@ -66,18 +66,39 @@ public enum FileTypeSniffer {
             if brand.hasPrefix("hei") || brand == "mif1" || brand == "heix" {
                 return DetectedFileType(fileExtension: "heic", fileType: .image, displayName: "HEIF image")
             }
+            if brand.hasPrefix("m4a") || brand.hasPrefix("m4b") || brand.hasPrefix("m4p") {
+                return DetectedFileType(fileExtension: "m4a", fileType: .audio, displayName: "MPEG-4 audio")
+            }
             if brand.hasPrefix("qt") {
                 return DetectedFileType(fileExtension: "mov", fileType: .video, displayName: "QuickTime video")
             }
             return DetectedFileType(fileExtension: "mp4", fileType: .video, displayName: "MP4 video")
         }
 
-        // 5. Plain-text fallback: valid UTF-8 with very few control bytes.
+        // 5. Raw MPEG audio (an MP3 with no ID3 tag): a valid frame header at the start. Validating
+        //    the version/layer/bitrate/sample-rate fields keeps the 11-bit sync from false-matching.
+        if isMPEGAudioFrameHeader(bytes) {
+            return DetectedFileType(fileExtension: "mp3", fileType: .audio, displayName: "MP3 audio")
+        }
+
+        // 6. Plain-text fallback: valid UTF-8 with very few control bytes.
         if looksLikeText(bytes) {
             return DetectedFileType(fileExtension: "txt", fileType: .text, displayName: "Plain text")
         }
 
         return nil
+    }
+
+    /// True if `bytes` begins with a structurally valid MPEG-1/2 Audio (Layer I–III) frame header.
+    /// Rejects the reserved/invalid field encodings so a bare `FF Ex` sync isn't enough.
+    private static func isMPEGAudioFrameHeader(_ bytes: [UInt8]) -> Bool {
+        guard bytes.count >= 4 else { return false }
+        guard bytes[0] == 0xFF, (bytes[1] & 0xE0) == 0xE0 else { return false } // 11-bit frame sync
+        let version = (bytes[1] >> 3) & 0x03   // 01 = reserved
+        let layer = (bytes[1] >> 1) & 0x03     // 00 = reserved
+        let bitrate = (bytes[2] >> 4) & 0x0F   // 1111 = bad
+        let sampleRate = (bytes[2] >> 2) & 0x03 // 11 = reserved
+        return version != 0b01 && layer != 0b00 && bitrate != 0b1111 && sampleRate != 0b11
     }
 
     private static func looksLikeText(_ bytes: [UInt8]) -> Bool {

@@ -109,6 +109,14 @@ public struct SignatureFileCarver: FileCarver {
                           maxExpectedSize: 256 * 1024 * 1024,
                           headerFollowSet: [0x02, 0x03, 0x04],
                           displayName: "MP3 audio"),
+            // FLAC: the "fLaC" stream marker. No simple total-size field, so size-capped.
+            FileSignature(magic: [0x66, 0x4C, 0x61, 0x43],
+                          fileExtension: "flac", fileType: .audio,
+                          maxExpectedSize: 1024 * 1024 * 1024, displayName: "FLAC audio"),
+            // Ogg (Vorbis/Opus/FLAC): the "OggS" page marker. Usually audio.
+            FileSignature(magic: [0x4F, 0x67, 0x67, 0x53],
+                          fileExtension: "ogg", fileType: .audio,
+                          maxExpectedSize: 1024 * 1024 * 1024, displayName: "Ogg audio"),
             // Matroska / WebM: the EBML header magic. (Both use it; WebM is just a Matroska
             // profile.) No simple total-size field, so it's size-capped.
             FileSignature(magic: [0x1A, 0x45, 0xDF, 0xA3],

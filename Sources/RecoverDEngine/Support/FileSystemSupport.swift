@@ -72,7 +72,7 @@ func inferFileTypeFromName(_ name: String) -> RecoverableFileType {
     case "jpg", "jpeg", "png", "gif", "bmp", "heic", "tiff", "tif": return .image
     case "mp4", "mov", "avi", "mkv", "m4v", "webm",
          "mpeg", "mpg", "ts", "m2ts", "vob", "wmv", "flv": return .video
-    case "mp3", "wav", "aac", "flac", "m4a": return .audio
+    case "mp3", "wav", "aac", "flac", "m4a", "m4b", "ogg", "oga", "opus", "aiff", "aif": return .audio
     case "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "pages", "rtf": return .document
     case "zip", "rar", "7z", "gz", "tar": return .archive
     case "txt", "log", "md", "csv", "json", "xml", "swift", "c", "h", "py": return .text

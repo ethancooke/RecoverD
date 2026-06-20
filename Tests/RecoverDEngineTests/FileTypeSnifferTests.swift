@@ -43,6 +43,30 @@ struct FileTypeSnifferTests {
         #expect(FileTypeSniffer.detect(ts)?.fileExtension == "ts")
     }
 
+    @Test func detectsAudioFormats() {
+        // FLAC stream marker.
+        let flac = Array("fLaC".utf8) + [UInt8](repeating: 0, count: 32)
+        #expect(FileTypeSniffer.detect(flac)?.fileType == .audio)
+        #expect(FileTypeSniffer.detect(flac)?.fileExtension == "flac")
+
+        // Ogg page marker.
+        let ogg = Array("OggS".utf8) + [UInt8](repeating: 0, count: 32)
+        #expect(FileTypeSniffer.detect(ogg)?.fileExtension == "ogg")
+
+        // M4A (ISO-BMFF with an M4A brand) must be audio, not video.
+        let m4a: [UInt8] = [0, 0, 0, 0x18] + Array("ftypM4A ".utf8) + [UInt8](repeating: 0, count: 16)
+        #expect(FileTypeSniffer.detect(m4a)?.fileType == .audio)
+        #expect(FileTypeSniffer.detect(m4a)?.fileExtension == "m4a")
+
+        // Raw MP3 frame (no ID3): FF FB = sync + MPEG-1 Layer III; 0x90 = valid bitrate/samplerate.
+        let mp3Frame: [UInt8] = [0xFF, 0xFB, 0x90, 0x00] + [UInt8](repeating: 0, count: 32)
+        #expect(FileTypeSniffer.detect(mp3Frame)?.fileType == .audio)
+
+        // A JPEG (FF D8) must NOT be mistaken for a raw MP3 frame.
+        let jpeg: [UInt8] = [0xFF, 0xD8, 0xFF, 0xE0] + [UInt8](repeating: 0, count: 16)
+        #expect(FileTypeSniffer.detect(jpeg)?.fileType == .image)
+    }
+
     @Test func detectsMP4ByFtypBox() {
         let mp4: [UInt8] = [0, 0, 0, 0x18] + Array("ftypisom".utf8) + [UInt8](repeating: 0, count: 16)
         let d = FileTypeSniffer.detect(mp4)
