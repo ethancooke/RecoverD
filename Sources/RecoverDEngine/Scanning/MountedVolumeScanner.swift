@@ -8,9 +8,9 @@ import RecoverDCore
 /// files — useful when the user wants to recover files from a working but failing drive, or
 /// browse what's on a volume before attempting deleted-file recovery.
 ///
-/// For deleted files and carving, the engine needs raw device access (`AuthorizedRawReader` or
-/// an image file). The `ScanEngine` uses both: filesystem scan for live files + raw scan for
-/// deleted/carved files when available.
+/// For deleted files and carving, the engine needs raw device access (an authorized `RawFDReader`
+/// over `/dev/rdiskN`, or an image file). The `ScanEngine` uses both: filesystem scan for live
+/// files + raw scan for deleted/carved files when available.
 ///
 /// SECURITY: reads only file metadata (name, size, dates) through the filesystem. File *content*
 /// is never read during scanning — it's fetched on demand at preview/export time.

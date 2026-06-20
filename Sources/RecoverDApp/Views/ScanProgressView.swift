@@ -3,7 +3,6 @@ import RecoverDCore
 import RecoverDEngine
 
 /// Live scan progress with pause/resume/cancel and an in-RAM indicator.
-/// Shows an imaging step when creating a .dmg of a physical device.
 /// During scanning, shows files found so far in real time — with selection and recovery
 /// available even while the scan is running.
 /// Ordering options for the live "files found so far" list. Default keeps discovery order so the
@@ -29,11 +28,7 @@ struct ScanProgressView: View {
         VStack(spacing: 0) {
             ScrollView {
                 VStack(spacing: 24) {
-                    if session.isImaging {
-                        imagingView
-                    } else {
-                        scanningView
-                    }
+                    scanningView
 
                     if !currentFiles.isEmpty {
                         liveResultsView
@@ -88,45 +83,6 @@ struct ScanProgressView: View {
         }
     }
 
-    // MARK: Imaging
-
-    private var imagingView: some View {
-        VStack(spacing: 12) {
-            Image(systemName: "arrow.down.doc")
-                .font(.system(size: 44))
-                .foregroundStyle(.tint)
-            Text("Creating disk image…")
-                .font(.headline)
-            Text("Reading \(session.selectedDevice?.displayName ?? "device")")
-                .foregroundStyle(.secondary)
-                .font(.caption)
-
-            VStack(spacing: 8) {
-                ProgressView(value: imagingFraction)
-                    .progressViewStyle(.linear)
-                    .labelsHidden()
-                HStack {
-                    Text("\(ByteCountFormatter.string(fromByteCount: session.imagingBytesDone, countStyle: .file)) / \(ByteCountFormatter.string(fromByteCount: session.imagingBytesTotal, countStyle: .file))")
-                        .monospacedDigit()
-                    Spacer()
-                    Text("\(Int(imagingFraction * 100))%")
-                        .monospacedDigit()
-                }
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            }
-            .padding(.horizontal, 120)
-
-            Text("Temporary copy in /tmp — deleted when the scan ends")
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
-
-            Button("Cancel", role: .destructive) {
-                Task { await session.cancelImaging() }
-            }
-            .help("Cancel the imaging and return to the device picker")
-        }
-    }
 
     // MARK: Scanning
 
@@ -316,11 +272,6 @@ struct ScanProgressView: View {
         case .deleted: .orange
         case .orphaned: .blue
         }
-    }
-
-    private var imagingFraction: Double {
-        guard session.imagingBytesTotal > 0 else { return 0 }
-        return min(1, Double(session.imagingBytesDone) / Double(session.imagingBytesTotal))
     }
 
     private func percentText(_ fraction: Double) -> String {

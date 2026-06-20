@@ -46,12 +46,8 @@ final class RecoverySessionViewModel {
     var previewFile: RecoverableFile?
     var exportProgress: ExportProgress?
     var lastExportedFiles: [URL] = []
-    var imagingProgress: ImagingProgress?
     var showInternalDevices: Bool = false
     var scanStrategy: ScanStrategy = .unknown
-    var isImaging: Bool = false
-    var imagingBytesDone: Int64 = 0
-    var imagingBytesTotal: Int64 = 0
     private var lastShowInternal: Bool = false
 
     // MARK: Engine + transient state
@@ -59,7 +55,6 @@ final class RecoverySessionViewModel {
     let engine = ScanEngine()
     private var reader: (any RawBlockReader)?
     private var rawReader: RawFDReader?
-    private var imageReader: DeviceImageReader?
     private var progressTask: Task<Void, Never>?
     private var devicePollTask: Task<Void, Never>?
 
@@ -317,13 +312,6 @@ final class RecoverySessionViewModel {
     func pause() async { await engine.pause() }
     func resume() async { await engine.resume() }
     func cancel() async { await engine.cancel() }
-
-    func cancelImaging() async {
-        await imageReader?.cancelImaging()
-        imageReader = nil
-        isImaging = false
-        progress = ScanProgress()
-    }
 
     func clear() async {
         progressTask?.cancel()

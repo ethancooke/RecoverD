@@ -26,6 +26,21 @@ final class RecoverDAppDelegate: NSObject, NSApplicationDelegate {
         // with no Dock icon. Force a regular, foreground app and bring the window forward.
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
+
+        // Self-heal: older builds imaged the device to a temporary `.dmg` and didn't always clean
+        // up. Sweep any such leftovers so they can't silently fill the disk. (This build never
+        // writes them — reads go straight to RAM.)
+        sweepStaleDeviceImages()
+    }
+
+    /// Removes stale `recoverd_*.dmg` files left by previous (imaging-based) builds in the temp dir.
+    private func sweepStaleDeviceImages() {
+        let tmp = FileManager.default.temporaryDirectory
+        guard let items = try? FileManager.default.contentsOfDirectory(
+            at: tmp, includingPropertiesForKeys: nil) else { return }
+        for url in items where url.lastPathComponent.hasPrefix("recoverd_") && url.pathExtension == "dmg" {
+            try? FileManager.default.removeItem(at: url)
+        }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
