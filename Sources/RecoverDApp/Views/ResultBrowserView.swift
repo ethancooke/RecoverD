@@ -146,6 +146,11 @@ private struct ResultRow: View {
                     if file.isCarved, let match = file.signatureMatch {
                         Label(match, systemImage: "wand.and.stars")
                     }
+                    if file.isLowConfidence {
+                        Label("low confidence", systemImage: "exclamationmark.triangle")
+                            .foregroundStyle(.orange)
+                            .help("No index/end marker found — likely a fragment or false positive. It may not open.")
+                    }
                 }
                 .font(.caption)
                 .foregroundStyle(.secondary)

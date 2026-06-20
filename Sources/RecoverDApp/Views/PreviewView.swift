@@ -44,6 +44,10 @@ struct PreviewView: View {
                         Text(file.fileType.displayName)
                     }
                     statusBadge
+                    if file.isLowConfidence {
+                        Label("low confidence", systemImage: "exclamationmark.triangle")
+                            .foregroundStyle(.orange)
+                    }
                 }
                 .font(.caption)
                 .foregroundStyle(.secondary)

@@ -78,8 +78,10 @@ struct VideoPreviewView: View {
             _ = duration
         } catch {
             await MainActor.run {
-                self.loadError = "Couldn't play this file — it may be corrupted, incomplete, or "
-                    + "in a format macOS can't open. You can still recover it to disk."
+                self.loadError = "Couldn't play this \(audioOnly ? "audio" : "video") here. If it was "
+                    + "carved, large media is often fragmented on disk, so the recovered copy can be "
+                    + "incomplete. Recover it and try a tolerant player like VLC — the header looks "
+                    + "valid, so part of it may still play."
                 self.isLoading = false
             }
         }

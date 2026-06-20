@@ -271,11 +271,13 @@ public actor ScanEngine {
             // ISO-BMFF: walk the box chain to size each hit, then record it.
             for hit in isoHits {
                 let cap = min(isoMaxSize, total - hit.start)
-                let size = try await walkISOBMFFSize(start: hit.start, cap: cap, reader: reader)
+                let (size, hasMoov) = try await walkISOBMFFSize(start: hit.start, cap: cap, reader: reader)
                 let form = SignatureFileCarver.isoBMFFType(brand: hit.brand)
                 files.append(carver.makeContainerFile(
                     fileExtension: form.fileExtension, fileType: form.fileType,
-                    displayName: form.displayName, offset: hit.start, size: size, deviceID: device.id
+                    displayName: form.displayName, offset: hit.start, size: size,
+                    // No moov ⇒ a fragment or false positive that can't play — flag it low.
+                    confidence: hasMoov ? 0.85 : 0.4, deviceID: device.id
                 ))
                 progress.filesFound = files.count
             }
@@ -380,33 +382,43 @@ public actor ScanEngine {
     /// 4-byte type that isn't a known box (the end of the file) or hits the size `cap`. Each step
     /// reads only a 16-byte box header and jumps over the (possibly huge) payload, so it's a few
     /// small reads per file. Returns the file length.
-    private func walkISOBMFFSize(start: Int64, cap: Int64, reader: any RawBlockReader) async throws -> Int64 {
+    /// Returns the file length and whether a `moov` box was seen. A playable MP4/MOV must have a
+    /// `moov` (its sample tables); its absence means an `mdat`-only fragment or a false positive —
+    /// useful as a confidence signal.
+    private func walkISOBMFFSize(start: Int64, cap: Int64, reader: any RawBlockReader) async throws
+        -> (size: Int64, hasMoov: Bool) {
         let known: Set<String> = ["ftyp", "moov", "mdat", "free", "skip", "wide", "uuid", "meta",
                                   "mfra", "moof", "sidx", "styp", "pdin", "pnot", "udta"]
         let limit = start + cap
         var pos = start
+        var hasMoov = false
         while pos < limit {
             let header = try await reader.read(at: pos, count: 16)
             if header.count < 8 { header.wipe(); break }
-            let boxSize: Int64? = header.withUnsafeBytes { buf -> Int64? in
+            let parsed: (size: Int64, type: String)? = header.withUnsafeBytes { buf in
                 let size32 = (UInt32(buf[0]) << 24) | (UInt32(buf[1]) << 16)
                     | (UInt32(buf[2]) << 8) | UInt32(buf[3])
                 let type = String(bytes: [buf[4], buf[5], buf[6], buf[7]], encoding: .ascii) ?? ""
                 guard known.contains(type) else { return nil } // not a box → end of file
+                let boxSize: Int64
                 if size32 == 1 {
                     guard buf.count >= 16 else { return nil }
                     var large: UInt64 = 0
                     for i in 8..<16 { large = (large << 8) | UInt64(buf[i]) }
-                    return Int64(bitPattern: large)
+                    boxSize = Int64(bitPattern: large)
+                } else if size32 == 0 {
+                    boxSize = limit - pos // box runs to EOF
+                } else {
+                    boxSize = Int64(size32)
                 }
-                if size32 == 0 { return limit - pos } // box runs to EOF
-                return Int64(size32)
+                return (boxSize, type)
             }
             header.wipe()
-            guard let size = boxSize, size >= 8 else { break }
-            pos += size
+            guard let parsed, parsed.size >= 8 else { break }
+            if parsed.type == "moov" { hasMoov = true }
+            pos += parsed.size
         }
-        return min(max(pos - start, 0), cap)
+        return (min(max(pos - start, 0), cap), hasMoov)
     }
 
     /// Scans forward for the first occurrence of `footer`, returning the absolute offset just past

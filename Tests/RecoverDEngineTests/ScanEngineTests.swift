@@ -228,6 +228,42 @@ struct ScanEngineTests {
         await engine.clear()
     }
 
+    @Test("ISO-BMFF carve confidence reflects whether a moov atom is present")
+    func carveISOBMFFConfidence() async throws {
+        let size = 200_000
+        var bytes = [UInt8](repeating: 0, count: size)
+        func be32(_ o: Int, _ v: UInt32) {
+            bytes[o] = UInt8(v >> 24); bytes[o + 1] = UInt8((v >> 16) & 0xFF)
+            bytes[o + 2] = UInt8((v >> 8) & 0xFF); bytes[o + 3] = UInt8(v & 0xFF)
+        }
+        func ascii(_ o: Int, _ s: String) { bytes.replaceSubrange(o..<o + s.utf8.count, with: Array(s.utf8)) }
+
+        // With moov: ftyp(24) + moov(40) + mdat(100).
+        let withMoov = 20_000
+        be32(withMoov, 24);       ascii(withMoov + 4, "ftyp"); ascii(withMoov + 8, "isom")
+        be32(withMoov + 24, 40);  ascii(withMoov + 28, "moov")
+        be32(withMoov + 64, 100); ascii(withMoov + 68, "mdat")
+        // Without moov: ftyp(24) + mdat(100) — a fragment.
+        let noMoov = 60_000
+        be32(noMoov, 24);      ascii(noMoov + 4, "ftyp"); ascii(noMoov + 8, "isom")
+        be32(noMoov + 24, 100); ascii(noMoov + 28, "mdat")
+
+        let reader = InMemoryBlockReader(bytes)
+        let device = DeviceInfo(
+            id: DeviceID("t"), displayName: "t", bsdName: "x", devicePath: "/x", rawPath: "/x",
+            totalSize: Int64(size), blockSize: 512, isRemovable: true, isExternal: true
+        )
+        let engine = ScanEngine()
+        await engine.startScan(device: device, mode: .deep, reader: reader)
+        let stream = await engine.subscribeProgress()
+        for await update in stream where update.phase == .complete { break }
+        let files = await engine.snapshot().files
+
+        #expect(try #require(files.first { $0.byteOffset == Int64(withMoov) }).isLowConfidence == false)
+        #expect(try #require(files.first { $0.byteOffset == Int64(noMoov) }).isLowConfidence == true)
+        await engine.clear()
+    }
+
     @Test("Quick scan with unknown FS yields no files and still completes")
     func quickScanUnknownFS() async throws {
         let reader = InMemoryBlockReader([UInt8](repeating: 0, count: 4096))

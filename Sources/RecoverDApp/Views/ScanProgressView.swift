@@ -245,6 +245,13 @@ struct ScanProgressView: View {
             .buttonStyle(.plain)
             .help("Preview this file (photo, video, PDF, text)")
 
+            if file.isLowConfidence {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+                    .help("Low confidence — likely a fragment or false positive; may not open.")
+            }
+
             Text(ByteCountFormatter.string(fromByteCount: file.size, countStyle: .file))
                 .font(.caption2)
                 .foregroundStyle(.secondary)

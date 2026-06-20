@@ -226,6 +226,7 @@ public struct SignatureFileCarver: FileCarver {
                                   displayName: String,
                                   offset: Int64,
                                   size: Int64,
+                                  confidence: Double = 0.85,
                                   deviceID: DeviceID) -> RecoverableFile {
         RecoverableFile(
             id: FileID("carved:\(offset):\(fileExtension)"),
@@ -236,8 +237,7 @@ public struct SignatureFileCarver: FileCarver {
             byteOffset: offset,
             allocationStatus: .orphaned,
             sourceDeviceID: deviceID,
-            // Valid container header + derived size ⇒ high confidence it's a real file.
-            confidence: 0.85,
+            confidence: confidence,
             signatureMatch: displayName
         )
     }

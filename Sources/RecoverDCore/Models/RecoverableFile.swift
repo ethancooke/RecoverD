@@ -91,6 +91,10 @@ public struct RecoverableFile: Identifiable, Hashable, Sendable {
     }
 
     public var isCarved: Bool { allocationStatus == .orphaned }
+
+    /// Flagged uncertain in the UI (e.g. an MP4 carve with no `moov` atom — a fragment or false
+    /// positive). The threshold keeps footer-bounded/known-form carves and live files unflagged.
+    public var isLowConfidence: Bool { confidence < 0.5 }
     public var canPreview: Bool {
         switch fileType {
         case .image, .video, .audio, .text, .document: true
