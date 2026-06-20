@@ -153,7 +153,7 @@ public actor ScanEngine {
             if mode == .deep {
                 progress.phase = .carving
                 broadcast()
-                try await carve(device: device, reader: reader)
+                try await carve(device: device, baseReader: reader)
             }
 
             progress.phase = .finalizing
@@ -172,8 +172,12 @@ public actor ScanEngine {
         scanTask = nil
     }
 
-    private func carve(device: DeviceInfo, reader: any RawBlockReader) async throws {
+    private func carve(device: DeviceInfo, baseReader: any RawBlockReader) async throws {
         let carver = SignatureFileCarver()
+        // Shared cache so the sequential scan and the forward-reading size resolvers don't fetch
+        // the same regions off the device twice.
+        let reader = await CachingBlockReader(baseReader)
+        defer { Task { await reader.purge() } }
         let total = await reader.totalSize
         let chunkSize = 4 * 1024 * 1024
         let overlap = 64
