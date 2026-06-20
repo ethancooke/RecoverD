@@ -190,18 +190,39 @@ public actor ScanEngine {
         // stream is carved we skip pack hits inside its extent.
         var mpegConsumedUntil: Int64 = 0
 
-        while offset < total {
+        // First-byte dispatch: instead of scanning each chunk once per signature (~one pass per
+        // signature), iterate the buffer once and only test signatures whose magic could start at
+        // the current byte. Most bytes start no signature, so this is a large CPU win.
+        var signaturesByFirstByte = [[FileSignature]](repeating: [], count: 256)
+        for signature in carver.signatures {
+            if let first = signature.magic.first { signaturesByFirstByte[Int(first)].append(signature) }
+        }
+
+        // Pipeline: prefetch the next chunk (via the reader actor) while the current one is scanned
+        // and sized, so the device isn't left idle waiting on the CPU.
+        func readChunk(_ off: Int64) -> Task<SecureData, Error> {
+            let count = Int(min(Int64(chunkSize), total - off))
+            return Task { try await reader.read(at: off, count: count) }
+        }
+        var pending: Task<SecureData, Error>? = total > 0 ? readChunk(0) : nil
+        defer { pending?.cancel() }
+
+        while let task = pending {
             try Task.checkCancellation()
             while paused {
                 try Task.checkCancellation()
                 try await Task.sleep(nanoseconds: 150_000_000)
             }
 
-            let readCount = Int(min(Int64(chunkSize), total - offset))
-            let chunk = try await reader.read(at: offset, count: readCount)
+            let chunk = try await task.value
             let chunkCount = chunk.count
-            if chunkCount == 0 { break }
+            if chunkCount == 0 { chunk.wipe(); break }
             bytesRead += Int64(chunkCount)
+
+            // Start the next read now so it overlaps the scan/sizing below.
+            let advanced = offset + Int64(chunkCount)
+            let nextOffset = advanced < total ? advanced - Int64(overlap) : advanced
+            pending = nextOffset < total ? readChunk(nextOffset) : nil
 
             // First pass (synchronous, inside the secure buffer): collect confirmed magic hits.
             // We can't resolve footer-bounded sizes here because that needs async reads, so we
@@ -216,14 +237,18 @@ public actor ScanEngine {
                 var iso: [(start: Int64, brand: String)] = []
                 var tiff: [(start: Int64, ext: String, name: String)] = []
                 var ebml: [Int64] = []
-                for signature in carver.signatures {
-                    var cursor = 0
-                    while cursor < buf.count {
-                        guard let rel = findMagic(in: buf, magic: signature.magic, from: cursor) else {
-                            break
-                        }
-                        cursor = rel + 1
-                        let absolute = base + Int64(rel)
+                var i = 0
+                while i < buf.count {
+                    let candidates = signaturesByFirstByte[Int(buf[i])]
+                    if candidates.isEmpty { i += 1; continue }
+                    let rel = i
+                    let absolute = base + Int64(rel)
+                    for signature in candidates {
+                        let magic = signature.magic
+                        guard rel + magic.count <= buf.count else { continue }
+                        var matched = true
+                        for j in 0..<magic.count where buf[rel + j] != magic[j] { matched = false; break }
+                        guard matched else { continue }
 
                         // Self-describing container (RIFF): parse the header here to size + type it,
                         // and drop hits whose form type we don't recognize (false positives).
@@ -294,8 +319,9 @@ public actor ScanEngine {
                         if seenOffsets.insert(absolute).inserted {
                             found.append((signature, absolute))
                         }
-                    }
-                }
+                    } // candidates
+                    i += 1
+                } // buffer scan
                 return (found, riff, iso, tiff, ebml)
             }
             chunk.wipe()
@@ -367,13 +393,10 @@ public actor ScanEngine {
                 progress.filesFound = files.count
             }
 
-            progress.bytesScanned = min(total, offset + Int64(chunkCount))
+            progress.bytesScanned = min(total, advanced)
             broadcast()
 
-            offset += Int64(chunkCount)
-            if offset < total {
-                offset -= Int64(overlap)
-            }
+            offset = nextOffset
         }
     }
 
