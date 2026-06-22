@@ -22,8 +22,12 @@ being executed or persisted on the host.
 images and real external devices:
 
 - **File-system parsers**: **exFAT** (live + deleted-file recovery, FAT-chain extents, recursive
-  directory walk) and **FAT12/16/32** (BPB, FAT12/16/32 type detection, 8.3 + LFN decoding, `0xE5`
-  deleted-entry recovery). **APFS** and **HFS+** parsers are stubs (see [Next steps](#next-steps)).
+  directory walk), **FAT12/16/32** (BPB, FAT12/16/32 type detection, 8.3 + LFN decoding, `0xE5`
+  deleted-entry recovery), and **NTFS** (MFT walk with update-sequence fixups, resident +
+  non-resident `$DATA` data-run extents, `$FILE_NAME` parent-chain path resolution, and
+  deleted-record recovery). When the OS doesn't label a volume, a boot-sector/superblock
+  **content probe** routes it to the right parser. **APFS** and **HFS+** parsers are stubs (see
+  [Next steps](#next-steps)).
 - **Deep / carving scan** with a broad signature table: JPEG, PNG, GIF, PDF, ZIP, RIFF (AVI/WAV/
   WebP), MP3 (ID3 + raw frame sync), FLAC, Ogg, ISO-BMFF (MP4/MOV/M4A/HEIC), Matroska/WebM, MPEG
   program stream, TIFF, and camera RAW (ORF, RW2, Fujifilm RAF, Sigma X3F, Canon CR2/CR3, plus
@@ -64,8 +68,8 @@ pairs a privileged low-level engine with a SwiftUI UI. Keep as-is.
 - **In-memory sandbox**: metadata, thumbnails, and previews live in RAM and are securely wiped
   on clear/quit. File *contents* are never written to disk without an explicit Save.
 - **Quick scan** (file-system metadata) and **Deep / carving scan** (reformatted/corrupted media).
-- **File-system parsing**: **exFAT + FAT12/16/32 implemented**; APFS (via `libfsapfs` bridging) and
-  HFS+ planned.
+- **File-system parsing**: **exFAT, FAT12/16/32, and NTFS implemented**; APFS (via `libfsapfs`
+  bridging) and HFS+ planned.
 - **Signature carving** of JPEG, PNG, GIF, PDF, ZIP, RIFF, MP3, FLAC, Ogg, MP4/MOV/M4A/HEIC,
   Matroska/WebM, MPEG, TIFF, and camera RAW — header-sized where possible, with "Try harder" and
   "Include RAW" toggles.
@@ -148,7 +152,7 @@ RecoverD/
 │       │                          # PrivilegedRawDevice (authopen) + RawFDReader (pread),
 │       │                          # CachingBlockReader, MountedFileReader, PrivilegedDiskAccess
 │       │                          # (XPC helper protocol scaffold)
-│       ├── Filesystems/           # parser protocol + exFAT/FAT12-16-32 (implemented),
+│       ├── Filesystems/           # parser protocol + exFAT/FAT12-16-32/NTFS (implemented),
 │       │                          # APFS/HFS+ stubs
 │       ├── Carving/               # FileCarver (signature table) + FileTypeSniffer
 │       ├── Scanning/              # ScanEngine actor + MountedVolumeScanner
@@ -232,7 +236,7 @@ See `Sources/RecoverDEngine/Devices/BlockDeviceReader.swift` (`RawBlockReader` +
    (GIF/ZIP/MP3/FLAC/Ogg/MPEG), plus more signatures.
 9. **Notarization CI** (GitHub Actions: `notarytool` + `stapler`).
 
-Already landed: exFAT + FAT12/16/32 parsing, signature carving for the formats listed in
+Already landed: exFAT + FAT12/16/32 + NTFS parsing, signature carving for the formats listed in
 [Highlights](#highlights), content sniffing, in-app previews, no-copy `authopen` raw reads, the
 session read cache, pause/resume/cancel, results sorting, and low-confidence carve flagging.
 

@@ -146,7 +146,11 @@ public actor ScanEngine {
 
             progress.phase = .parsing
             broadcast()
-            if let parser = makeFilesystemParser(for: device, reader: reader) {
+            var parser = makeFilesystemParser(for: device, reader: reader)
+            if parser == nil {
+                parser = await probeFilesystemParser(for: device, reader: reader)
+            }
+            if let parser {
                 let parsed = try await parser.parse()
                 files.append(contentsOf: parsed)
                 progress.filesFound = files.count

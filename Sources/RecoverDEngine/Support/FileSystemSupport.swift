@@ -1,7 +1,7 @@
 import Foundation
 import RecoverDCore
 
-// Shared helpers for file-system parsers (exFAT, FAT12/16/32, future HFS+/APFS).
+// Shared helpers for file-system parsers (exFAT, FAT12/16/32, NTFS, future HFS+/APFS).
 // Internal to RecoverDEngine — not part of the public API.
 
 func readU16LE(_ b: [UInt8], at off: Int) -> UInt16 {
@@ -53,6 +53,17 @@ func fatTimestampToDate(_ raw: UInt32) -> Date? {
 /// Convenience for FAT12/16/32 separate date/time fields.
 func fatDateTimeToDate(date: UInt16, time: UInt16) -> Date? {
     fatTimestampToDate((UInt32(date) << 16) | UInt32(time))
+}
+
+/// Windows FILETIME: 100-nanosecond intervals since 1601-01-01 UTC. Used by NTFS
+/// ($STANDARD_INFORMATION / $FILE_NAME timestamps). Returns nil for a zero/implausible value.
+func filetimeToDate(_ raw: UInt64) -> Date? {
+    guard raw != 0 else { return nil }
+    // Seconds between 1601-01-01 and 1970-01-01.
+    let epochDelta = 11_644_473_600.0
+    let seconds = Double(raw) / 10_000_000.0 - epochDelta
+    guard seconds > 0, seconds < 32_503_680_000 else { return nil } // sane: 1970..3000
+    return Date(timeIntervalSince1970: seconds)
 }
 
 /// Decodes a UTF-16LE string from code units, truncating to `maxLength` and stripping

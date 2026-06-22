@@ -22,7 +22,7 @@ SwiftUI-first UI; AppKit only where SwiftUI is insufficient (file panels, thumbn
 │             PrivilegedRawDevice (authopen fd) · RawFDReader (pread)   │
 │             CachingBlockReader · MountedFileReader                    │
 │             PrivilegedDiskAccess (XPC helper protocol — scaffold)     │
-│   Filesystems: FilesystemParser + exFAT/FAT12-16-32 (impl)            │
+│   Filesystems: FilesystemParser + exFAT/FAT12-16-32/NTFS (impl)       │
 │                APFS/HFS+ (stubs; APFS→libfsapfs)                      │
 │   Carving:   FileCarver · SignatureFileCarver · FileTypeSniffer       │
 │   Scanning:  ScanEngine (actor) + MountedVolumeScanner — own state    │
@@ -150,3 +150,30 @@ recover name (first char replaced with `_`), size, and first cluster from the 8.
 FAT chain freed so `extents` is nil (contiguous heuristic). FAT12's packed 12-bit entries are
 decoded correctly (odd/even cluster offset). Subdirectories are traversed recursively with a
 visited-cluster cycle guard. NT case-info bits (lowercase name/extension) are honored.
+
+### NTFS parser (implemented)
+
+`NTFSParser` recovers files from the **Master File Table** ($MFT). It reads the boot sector for
+geometry (bytes/sector, sectors/cluster, the $MFT's start cluster, and the clusters-per-record
+code), then reads MFT record 0 ($MFT itself) to learn — from its own non-resident `$DATA` data
+runs — where every MFT record lives (the table may be fragmented). Each 1024-byte FILE record is
+**fixed up** (the update-sequence array restores the last two bytes of every 512-byte stride)
+before its attributes are walked: `$STANDARD_INFORMATION` (timestamps), `$FILE_NAME` (name +
+parent reference, preferring the Win32 name over the 8.3/DOS one), and the unnamed `$DATA`.
+Resident `$DATA` (tiny files inline in the record) yields a single extent pointing into the MFT
+record; non-resident `$DATA` decodes its **data runs** (signed, previous-relative LCN deltas) into
+`ByteRange` extents, trimmed to the real data size. A record's in-use flag distinguishes **live**
+from **deleted** — deleted records usually retain intact runs, so they recover with extents.
+Compressed/sparse/encrypted `$DATA` is flagged low-confidence and left without extents rather than
+returning incorrect bytes. Full paths are reconstructed by walking each file's `$FILE_NAME` parent
+reference up to the root (record 5), with a cycle guard; NTFS metafiles (records 0–15 and any
+`$`-prefixed name) are skipped. Guardrails cap how much of the MFT is walked so a hostile volume
+can't exhaust memory.
+
+### Filesystem detection
+
+`makeFilesystemParser(for:reader:)` first dispatches on the OS-reported volume strings
+(`detectedFileSystems`). When those are absent — common for an NTFS Windows drive, or any
+filesystem macOS can't mount — `probeFilesystemParser(for:reader:)` reads the first sector and
+matches an on-disk magic (e.g. NTFS's `"NTFS    "` OEM id) to route to the right parser anyway.
+If neither resolves, a deep scan falls back to signature carving.
