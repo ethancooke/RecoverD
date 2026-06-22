@@ -14,6 +14,10 @@ results strictly in memory** until you explicitly export selected files to your 
 "sandboxed recovery" workflow minimizes the risk of malicious files on the external media
 being executed or persisted on the host.
 
+<p align="center">
+  <img src="screenshot.png" alt="RecoverD performing a deep carving scan — files found so far, with all results held in memory and nothing written to disk" width="720">
+</p>
+
 ---
 
 ## Status
