@@ -179,9 +179,6 @@ private struct DeviceRow: View {
                         if let vol = device.volumeName, !vol.isEmpty {
                             Text("· \(vol)")
                         }
-                        if !device.detectedFileSystems.isEmpty {
-                            Text("· \(device.detectedFileSystems.joined(separator: ", "))")
-                        }
                     }
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -196,7 +193,16 @@ private struct DeviceRow: View {
 
                 Spacer()
 
-                VStack(alignment: .trailing, spacing: 2) {
+                VStack(alignment: .trailing, spacing: 3) {
+                    if let fs = device.filesystemLabel {
+                        Text(fs)
+                            .font(.caption2.weight(.semibold))
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 1)
+                            .background(.secondary.opacity(0.18), in: Capsule())
+                            .foregroundStyle(.secondary)
+                            .help("Detected file system")
+                    }
                     Text(device.formattedSize)
                         .font(.caption)
                         .monospacedDigit()
@@ -256,8 +262,8 @@ private struct PartitionRow: View {
                     Text(partition.volumeName ?? partition.bsdName)
                     HStack(spacing: 6) {
                         Text("/dev/r\(partition.bsdName)")
-                        if !partition.detectedFileSystems.isEmpty {
-                            Text("· \(partition.detectedFileSystems.joined(separator: ", "))")
+                        if let fs = partition.filesystemLabel {
+                            Text("· \(fs)")
                         }
                         if let mp = partition.mountPoint {
                             Text("· mounted at \(mp.path)")

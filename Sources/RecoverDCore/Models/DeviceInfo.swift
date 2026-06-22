@@ -97,6 +97,16 @@ public struct PartitionInfo: Identifiable, Hashable, Sendable {
     public var hasSubpartitions: Bool {
         !subpartitions.isEmpty
     }
+
+    /// Clean filesystem label for this partition (e.g. "FAT32", "exFAT", "NTFS", "APFS", "HFS+"),
+    /// or nil if the content is unrecognized. Falls back to a nested subpartition's filesystem.
+    public var filesystemLabel: String? {
+        if let l = DeviceInfo.filesystemLabel(from: detectedFileSystems) { return l }
+        for sp in subpartitions {
+            if let l = sp.filesystemLabel { return l }
+        }
+        return nil
+    }
 }
 
 /// Metadata describing a connected block device. No content, no path on the host beyond the
@@ -166,6 +176,35 @@ public struct DeviceInfo: Identifiable, Hashable, Sendable {
 
     public var isLikelyExternalRecoveryTarget: Bool {
         isExternal || isRemovable
+    }
+
+    /// A clean, human filesystem label ("FAT32", "exFAT", "NTFS", "APFS", "HFS+") derived from the
+    /// OS-reported content hints. A whole disk usually only reports a *partition scheme*, so we fall
+    /// back to the first partition (or subpartition) carrying a recognizable filesystem.
+    public var filesystemLabel: String? {
+        if let l = DeviceInfo.filesystemLabel(from: detectedFileSystems) { return l }
+        for p in partitions {
+            if let l = p.filesystemLabel { return l }
+        }
+        return nil
+    }
+
+    /// Normalizes raw IORegistry / DiskArbitration content strings (e.g. "DOS_FAT_32", "msdos",
+    /// "Windows_NTFS", "Apple_APFS", a GPT type GUID) into a filesystem label. Returns nil for
+    /// partition schemes ("FDisk_partition_scheme") and unrecognized content.
+    public static func filesystemLabel(from raw: [String]) -> String? {
+        for token in raw {
+            let t = token.lowercased()
+            if t.contains("exfat") { return "exFAT" }
+            if t.contains("ntfs") { return "NTFS" }
+            if t.contains("apfs") || t.contains("41504653") || t.contains("7c3457ef") { return "APFS" }
+            if t.contains("fat_32") || t.contains("fat32") { return "FAT32" }
+            if t.contains("fat_16") || t.contains("fat16") { return "FAT16" }
+            if t.contains("fat_12") || t.contains("fat12") { return "FAT12" }
+            if t.contains("hfs") { return "HFS+" }
+            if t.contains("msdos") || t == "dos" { return "FAT" }
+        }
+        return nil
     }
 
     /// A human-readable size string.

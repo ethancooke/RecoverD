@@ -146,9 +146,11 @@ public actor ScanEngine {
 
             progress.phase = .parsing
             broadcast()
-            var parser = makeFilesystemParser(for: device, reader: reader)
+            // Prefer the boot-sector probe (ground truth on the actual reader) over the OS content
+            // hint; fall back to the hint for filesystems we can't magic-probe (APFS/HFS+).
+            var parser = await probeFilesystemParser(for: device, reader: reader)
             if parser == nil {
-                parser = await probeFilesystemParser(for: device, reader: reader)
+                parser = makeFilesystemParser(for: device, reader: reader)
             }
             if let parser {
                 let parsed = try await parser.parse()
