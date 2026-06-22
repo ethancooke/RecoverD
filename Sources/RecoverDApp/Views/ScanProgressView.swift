@@ -21,6 +21,7 @@ struct ScanProgressView: View {
     @State private var selection: Set<FileID> = []
     @State private var presentingExport = false
     @State private var sortKey: FileSortKey = .found
+    @AppStorage("useTachometerGauge") private var useTachometer = false
 
     private let displayLimit = 100
 
@@ -86,11 +87,34 @@ struct ScanProgressView: View {
 
     // MARK: Scanning
 
+    /// Lets the user switch the scan indicator between the standard bar and the tachometer gauge.
+    /// The choice is remembered across launches; default is the bar.
+    private var gaugeStylePicker: some View {
+        Picker("Progress style", selection: $useTachometer) {
+            Image(systemName: "chart.bar.fill").tag(false)
+            Image(systemName: "speedometer").tag(true)
+        }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+        .fixedSize()
+        .help("Switch the scan indicator between a progress bar and a tachometer gauge")
+    }
+
+    private var progressCaption: some View {
+        HStack {
+            Text(percentText(session.progress.fraction))
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+            Text("— in memory only").foregroundStyle(.tertiary)
+            if let region = session.progress.currentRegion {
+                Text("· \(region)").foregroundStyle(.secondary).lineLimit(1)
+            }
+        }
+        .font(.caption)
+    }
+
     private var scanningView: some View {
         VStack(spacing: 12) {
-            Image(systemName: "waveform.badge.magnifyingglass")
-                .font(.system(size: 44))
-                .foregroundStyle(.tint)
             Text(session.progress.phase.rawValue.capitalized)
                 .font(.headline)
             Text("\(session.progress.filesFound) files found")
@@ -100,21 +124,24 @@ struct ScanProgressView: View {
                 .foregroundStyle(.tertiary)
                 .padding(.top, 2)
 
-            VStack(spacing: 8) {
-                ProgressView(value: session.progress.fraction)
-                    .progressViewStyle(.linear)
-                    .labelsHidden()
-                HStack {
-                    Text(percentText(session.progress.fraction))
-                        .monospacedDigit()
-                    Spacer()
-                    if let region = session.progress.currentRegion {
-                        Text(region).foregroundStyle(.secondary).lineLimit(1)
-                    }
+            gaugeStylePicker
+
+            if useTachometer {
+                TachometerGauge(
+                    fraction: session.progress.fraction,
+                    centerText: percentText(session.progress.fraction),
+                    active: session.isScanning && !session.progress.isPaused
+                )
+                progressCaption
+            } else {
+                VStack(spacing: 8) {
+                    ProgressView(value: session.progress.fraction)
+                        .progressViewStyle(.linear)
+                        .labelsHidden()
+                    progressCaption
                 }
-                .font(.caption)
+                .padding(.horizontal, 120)
             }
-            .padding(.horizontal, 120)
 
             HStack {
                 if session.progress.isPaused {
@@ -275,6 +302,6 @@ struct ScanProgressView: View {
     }
 
     private func percentText(_ fraction: Double) -> String {
-        String(format: "%.1f%% — in memory only", fraction * 100)
+        "\(Int((fraction * 100).rounded()))%"
     }
 }
