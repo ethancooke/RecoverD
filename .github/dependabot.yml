@@ -1,12 +1,23 @@
 version: 2
 updates:
-  # GitHub Actions used by the CI workflows.
+  # GitHub Actions used by the CI workflows. Actions are pinned to their major tag (e.g.
+  # actions/checkout@v7), which GitHub resolves to the newest v7.x.x at run time — so patch and
+  # minor fixes arrive automatically with no PR. We therefore only want PRs for *major* bumps
+  # (potentially breaking, worth a review), grouped into one. This keeps us current without churn.
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
     commit-message:
       prefix: "ci"
+    groups:
+      actions:
+        patterns: ["*"]
+    ignore:
+      - dependency-name: "*"
+        update-types:
+          - "version-update:semver-patch"
+          - "version-update:semver-minor"
 
   # Swift Package Manager dependencies. RecoverD has no external dependencies today; this keeps
   # them updated automatically if any are added later (e.g. the planned libfsapfs bridge).
