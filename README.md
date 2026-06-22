@@ -183,10 +183,11 @@ Open in Xcode:
 xed .                        # opens the Swift Package in Xcode
 ```
 
-> **Note on bundling:** `swift build` compiles and runs the SwiftUI app, but a signed, notarized
-> `.app` bundle with entitlements and a privileged helper requires an **Xcode app-project
-> wrapper** (or a custom bundle script). That wrapper is the first post-scaffold step — see
-> [Next steps](#next-steps). The `Resources/*.plist` files are ready for it.
+> **Note on bundling:** `swift build` compiles and runs the SwiftUI app. To produce a signed,
+> notarized, distributable `.app` (packaged as a `.dmg`/`.zip`), run
+> [`Scripts/release.sh`](Scripts/release.sh) — it builds the binary, assembles the bundle, signs
+> with Developer ID + hardened runtime, notarizes, staples, and checksums. It degrades to an
+> ad-hoc build when no signing identity is set. See [`docs/RELEASING.md`](docs/RELEASING.md).
 
 ---
 
@@ -225,8 +226,7 @@ See `Sources/RecoverDEngine/Devices/BlockDeviceReader.swift` (`RawBlockReader` +
 
 ## Next steps
 
-1. **Xcode app-project wrapper** for signing/entitlements/notarization + the privileged helper.
-2. **`libfsapfs` bridge** (SwiftPM binary target or system-library wrapper) so `APFSParser`
+1. **`libfsapfs` bridge** (SwiftPM binary target or system-library wrapper) so `APFSParser`
    enumerates live + deleted files instead of returning empty.
 3. **Basic HFS+** parser (catalog B-tree); validate against fixture images.
 4. **Sandboxed GUI + `SMAppService` privileged helper** (XPC `RawBlockReader` against
@@ -238,9 +238,10 @@ See `Sources/RecoverDEngine/Devices/BlockDeviceReader.swift` (`RawBlockReader` +
    zero-on-quit (today's quit-wipe is best-effort).
 8. **Carving refinements**: footer/structure-based sizing for the remaining best-guess formats
    (GIF/ZIP/MP3/FLAC/Ogg/MPEG), plus more signatures.
-9. **Notarization CI** (GitHub Actions: `notarytool` + `stapler`).
 
-Already landed: exFAT + FAT12/16/32 + NTFS parsing, signature carving for the formats listed in
+Already landed: exFAT + FAT12/16/32 + NTFS parsing, the Developer ID signing + notarization +
+packaging pipeline (`Scripts/release.sh` + the `Release` workflow), signature carving for the
+formats listed in
 [Highlights](#highlights), content sniffing, in-app previews, no-copy `authopen` raw reads, the
 session read cache, pause/resume/cancel, results sorting, and low-confidence carve flagging.
 
