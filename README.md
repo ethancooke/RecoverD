@@ -4,6 +4,7 @@
 [![macOS 14+](https://img.shields.io/badge/macOS-14%2B-black?logo=apple)](#deployment-target)
 [![Apple Silicon](https://img.shields.io/badge/Apple_Silicon-arm64-black?logo=apple)](#highlights)
 [![Swift 6](https://img.shields.io/badge/Swift-6-orange?logo=swift)](Package.swift)
+[![Latest release](https://img.shields.io/github/v/release/ethancooke/RecoverD?label=download&logo=apple)](https://github.com/ethancooke/RecoverD/releases/latest)
 
 > A secure, native macOS file-recovery tool for external storage, built for Apple Silicon.
 > **Nothing leaves the source drive until *you* choose to save it.**
@@ -22,8 +23,10 @@ being executed or persisted on the host.
 
 ## Status
 
-🚧 **Pre-release.** The core recovery workflow is implemented and tested end-to-end against fixture
-images and real external devices:
+📦 **v0.1.0 — first release.** A signed + notarized build is on the
+[Releases page](https://github.com/ethancooke/RecoverD/releases/latest). It's early — APFS/HFS+
+recovery isn't built yet (see [Next steps](#next-steps)) — but the core recovery workflow is
+implemented and tested end-to-end against fixture images and real external devices:
 
 - **File-system parsers**: **exFAT** (live + deleted-file recovery, FAT-chain extents, recursive
   directory walk), **FAT12/16/32** (BPB, FAT12/16/32 type detection, 8.3 + LFN decoding, `0xE5`
@@ -168,6 +171,19 @@ RecoverD/
 ```
 
 ---
+
+## Install
+
+Download the latest signed, notarized build from the
+[**Releases page**](https://github.com/ethancooke/RecoverD/releases/latest): open
+`RecoverD-<version>.dmg` and drag **RecoverD** to Applications. It's Developer ID-signed and
+notarized, so it opens without a Gatekeeper warning. Apple Silicon, macOS 14+.
+
+> RecoverD reads raw devices, so on first scan macOS prompts once for admin authorization
+> (`authopen`). Nothing from the source is written to your Mac unless you explicitly export — see
+> the [security model](#security-model-the-non-negotiable-part).
+
+To build from source instead, see below.
 
 ## Build & run
 
