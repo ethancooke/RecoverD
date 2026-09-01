@@ -459,11 +459,15 @@ public actor ScanEngine {
         let limit = start + capped
 
         // JPEG: the trailer `FF D9` also terminates the embedded EXIF thumbnail, so the *first*
-        // one would truncate the photo. Depth-count nested SOI/EOI pairs and stop at the outer EOI.
+        // one would truncate the photo. Try a length-validated segment walk first — immune to
+        // marker-lookalike bytes inside APP-segment payloads (maker notes, XMP, IRB) — then the
+        // depth-counting fallback, then the cap.
         if signature.footer == [0xFF, 0xD9] {
-            if let end = try await findJPEGEnd(start: start, limit: limit, reader: reader) {
-                return (min(end - start, capped), true)
+            var end: Int64? = try await JPEGSegmentWalker.walkEnd(start: start, limit: limit, reader: reader)
+            if end == nil {
+                end = try await findJPEGEnd(start: start, limit: limit, reader: reader)
             }
+            if let end { return (min(end - start, capped), true) }
             return (capped, false)
         }
 
