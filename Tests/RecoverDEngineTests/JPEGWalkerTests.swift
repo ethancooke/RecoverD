@@ -41,7 +41,7 @@ struct JPEGWalkerTests {
     /// The base JPEG with an APP1 "Exif" segment spliced in after the SOI whose payload contains
     /// a stray, unbalanced `FF D8` — the maker-note lookalike that breaks depth counting.
     private static var craftedJPEG: [UInt8] {
-        var payload: [UInt8] = [0x45, 0x78, 0x69, 0x66, 0x00, 0x00,        // "Exif\0\0"
+        let payload: [UInt8] = [0x45, 0x78, 0x69, 0x66, 0x00, 0x00,        // "Exif\0\0"
                                 0xDE, 0xAD, 0xFF, 0xD8, 0xBE, 0xEF]        // stray SOI, no EOI
         let len = 2 + payload.count
         let app1: [UInt8] = [0xFF, 0xE1, UInt8(len >> 8), UInt8(len & 0xFF)] + payload
@@ -68,17 +68,72 @@ struct JPEGWalkerTests {
         return url
     }
 
-    /// baseJPEG with an APP2 segment declaring "MPF\0" spliced in after the SOI
-    /// (minimal declaration; the walker keys continuation on its presence).
-    private static var mpfDeclaredJPEG: [UInt8] {
-        let payload: [UInt8] = [0x4D, 0x50, 0x46, 0x00,        // "MPF\0"
-                                0x30, 0x30,                    // little-endian "00" version
-                                0x00, 0x02,                    // 2 individual images
-                                0x00, 0x00, 0x00, 0x10]        // entry: 2nd image at +16
+    /// A finite read budget turns a no-progress regression into a fast thrown-test failure rather
+    /// than hanging CI indefinitely.
+    private enum FixtureError: Error { case readBudgetExceeded }
+    private actor ReadBudgetReader: RawBlockReader {
+        let bytes: [UInt8]
+        let maxReads: Int
+        var reads = 0
+
+        init(bytes: [UInt8], maxReads: Int) {
+            self.bytes = bytes
+            self.maxReads = maxReads
+        }
+
+        var totalSize: Int64 { get async { Int64(bytes.count) } }
+        var blockSize: Int { get async { 512 } }
+
+        func read(at offset: Int64, count: Int) async throws -> SecureData {
+            reads += 1
+            guard reads <= maxReads else { throw FixtureError.readBudgetExceeded }
+            guard count > 0, offset >= 0, offset < Int64(bytes.count) else {
+                return SecureData(bytes: [])
+            }
+            let first = Int(offset)
+            let last = min(first + count, bytes.count)
+            return SecureData(bytes: Array(bytes[first..<last]))
+        }
+    }
+
+    /// A structurally complete MP Index with the three mandatory tags. MPEntry data is zeroed
+    /// because the walker only needs its declared extent and the adjacent SOIs.
+    private static func mpfAPP2(pictures: Int = 2, littleEndian: Bool = true) -> [UInt8] {
+        precondition((2...4).contains(pictures))
+        func e16(_ value: Int) -> [UInt8] {
+            let lo = UInt8(value & 0xFF), hi = UInt8((value >> 8) & 0xFF)
+            return littleEndian ? [lo, hi] : [hi, lo]
+        }
+        func e32(_ value: Int) -> [UInt8] {
+            let bytes = [UInt8(value & 0xFF), UInt8((value >> 8) & 0xFF),
+                         UInt8((value >> 16) & 0xFF), UInt8((value >> 24) & 0xFF)]
+            return littleEndian ? bytes : Array(bytes.reversed())
+        }
+        let mpEntryBytes = pictures * 16
+        let mpEntryOffset = 50                    // relative to TIFF header
+        var entries = e16(0xB000) + e16(7)             // B000 "0100"
+        entries += e32(4)
+        entries += [0x30, 0x31, 0x30, 0x30]
+        entries += e16(0xB001) + e16(4)                // B001 count
+        entries += e32(1)
+        entries += e32(pictures)
+        entries += e16(0xB002) + e16(7)                // B002 MPEntry
+        entries += e32(mpEntryBytes)
+        entries += e32(mpEntryOffset)
+        var tiff = (littleEndian ? [0x49, 0x49] : [0x4D, 0x4D]) + e16(42) + e32(8)
+        tiff += e16(3)
+        tiff += entries
+        tiff += e32(0)
+        tiff += [UInt8](repeating: 0, count: mpEntryBytes)
+        let payload = [0x4D, 0x50, 0x46, 0x00] + tiff                    // "MPF\0" + TIFF
         let len = 2 + payload.count
-        let app2: [UInt8] = [0xFF, 0xE2, UInt8(len >> 8), UInt8(len & 0xFF)] + payload
+        return [0xFF, 0xE2, UInt8(len >> 8), UInt8(len & 0xFF)] + payload
+    }
+
+    /// baseJPEG with a validated two-picture MP Index spliced in after the SOI.
+    private static var mpfDeclaredJPEG: [UInt8] {
         var bytes = baseJPEG
-        bytes.insert(contentsOf: app2, at: 2)
+        bytes.insert(contentsOf: mpfAPP2(), at: 2)
         return bytes
     }
 
@@ -154,6 +209,65 @@ struct JPEGWalkerTests {
         #expect(end == Int64(all.count), "declared MPF must walk through both pictures")
     }
 
+    @Test("Big-endian MP Index is validated and continued")
+    func bigEndianMPFContinues() async throws {
+        var first = Self.baseJPEG
+        first.insert(contentsOf: Self.mpfAPP2(littleEndian: false), at: 2)
+        let bytes = first + Self.baseJPEG
+        let url = try Self.writeTemp(bytes)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let reader = try await URLBlockReader(url: url)
+        let end = try await JPEGSegmentWalker.walkEnd(start: 0, limit: Int64(bytes.count), reader: reader)
+        #expect(end == Int64(bytes.count))
+    }
+
+    @Test("MP Index count, not a fixed heuristic, bounds multi-picture continuation")
+    func mpfCountBoundsContinuation() async throws {
+        var first = Self.baseJPEG
+        first.insert(contentsOf: Self.mpfAPP2(pictures: 3), at: 2)
+        let declaredThree = first + Self.baseJPEG + Self.baseJPEG
+        let bytes = declaredThree + Self.baseJPEG     // undeclared fourth adjacent JPEG
+        let url = try Self.writeTemp(bytes)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let reader = try await URLBlockReader(url: url)
+        let end = try await JPEGSegmentWalker.walkEnd(start: 0, limit: Int64(bytes.count), reader: reader)
+        #expect(end == Int64(declaredThree.count), "walk exactly the MP Index image count")
+    }
+
+    @Test("A secondary picture cannot reset the primary MP Index continuation cap")
+    func secondaryMPFDoesNotResetCount() async throws {
+        var first = Self.baseJPEG
+        first.insert(contentsOf: Self.mpfAPP2(pictures: 2), at: 2)
+        var second = Self.baseJPEG
+        second.insert(contentsOf: Self.mpfAPP2(pictures: 4), at: 2)
+        let declaredTwo = first + second
+        let bytes = declaredTwo + Self.baseJPEG
+        let url = try Self.writeTemp(bytes)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let reader = try await URLBlockReader(url: url)
+        let end = try await JPEGSegmentWalker.walkEnd(start: 0, limit: Int64(bytes.count), reader: reader)
+        #expect(end == Int64(declaredTwo.count))
+    }
+
+    @Test("A bare MPF identifier without a valid MP Index cannot merge an adjacent JPEG")
+    func bareMPFPrefixDoesNotMerge() async throws {
+        let payload = [0x4D, 0x50, 0x46, 0x00] + [UInt8](repeating: 0, count: 82)
+        let len = payload.count + 2
+        let bogusAPP2 = [0xFF, 0xE2, UInt8(len >> 8), UInt8(len & 0xFF)] + payload
+        var first = Self.baseJPEG
+        first.insert(contentsOf: bogusAPP2, at: 2)
+        let bytes = first + Self.baseJPEG
+        let url = try Self.writeTemp(bytes)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let reader = try await URLBlockReader(url: url)
+        let end = try await JPEGSegmentWalker.walkEnd(start: 0, limit: Int64(bytes.count), reader: reader)
+        #expect(end == Int64(first.count))
+    }
+
     // MARK: - Damage falls back gracefully
 
     @Test("Corrupt segment length returns nil so the depth-count fallback engages")
@@ -167,6 +281,40 @@ struct JPEGWalkerTests {
         let reader = try await URLBlockReader(url: url)
         let end = try await JPEGSegmentWalker.walkEnd(start: 0, limit: Int64(corrupt.count), reader: reader)
         #expect(end == nil, "structural failure must return nil, not a guess")
+    }
+
+    @Test("Truncated segment header returns nil without a no-progress loop")
+    func truncatedSegmentHeaderReturnsNil() async throws {
+        // This is accepted by the scanner's JPEG follow-byte filter but ends before the APP1
+        // length field. The read budget ensures a regression fails instead of hanging the suite.
+        let bytes: [UInt8] = [0xFF, 0xD8, 0xFF, 0xE1]
+        let reader = ReadBudgetReader(bytes: bytes, maxReads: 4)
+        let end = try await JPEGSegmentWalker.walkEnd(start: 0, limit: Int64(bytes.count), reader: reader)
+        #expect(end == nil)
+    }
+
+    @Test("Hostile public bounds return nil instead of overflowing")
+    func hostileBoundsReturnNil() async throws {
+        let reader = ReadBudgetReader(bytes: [], maxReads: 0)
+        #expect(try await JPEGSegmentWalker.walkEnd(start: -1, limit: 10, reader: reader) == nil)
+        #expect(try await JPEGSegmentWalker.walkEnd(start: 10, limit: 5, reader: reader) == nil)
+        #expect(try await JPEGSegmentWalker.walkEnd(
+            start: Int64.max - 1, limit: Int64.max, reader: reader
+        ) == nil)
+    }
+
+    @Test("A cancelled walk exits before reading more media")
+    func cancellationIsObserved() async {
+        let reader = ReadBudgetReader(bytes: Self.baseJPEG, maxReads: 0)
+        let task = Task<Int64?, Error> {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return try await JPEGSegmentWalker.walkEnd(
+                start: 0, limit: Int64(Self.baseJPEG.count), reader: reader
+            )
+        }
+        await #expect(throws: CancellationError.self) {
+            _ = try await task.value
+        }
     }
 
     // MARK: - Window straddle
@@ -189,6 +337,37 @@ struct JPEGWalkerTests {
         #expect(end == Int64(bytes.count), "both long APPs skipped; EOI found exactly")
     }
 
+    @Test("Marker fill at the 64 KiB edge cannot index beyond the read window")
+    func markerFillAtWindowEdgeIsSafe() async throws {
+        // APP0 makes this a scanner-accepted JPEG. TEM pairs place FF FF in the final two bytes
+        // of the first read, the exact boundary that previously indexed buf[buf.count].
+        var bytes: [UInt8] = [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x02]
+        for _ in 0..<32_765 { bytes += [0xFF, 0x01] }
+        bytes += [0xFF, 0xFF]
+        #expect(bytes.count == 65_538)
+        let reader = ReadBudgetReader(bytes: bytes, maxReads: 4)
+        let end = try await JPEGSegmentWalker.walkEnd(start: 0, limit: Int64(bytes.count), reader: reader)
+        #expect(end == nil)
+    }
+
+    @Test("An MPF identifier crossing the read edge is re-read, not skipped")
+    func mpfIdentifierStraddleContinues() async throws {
+        // The APP1 ends at relative byte 65,530, leaving only "FF E2 len MP" in the first
+        // window. The remaining "F\0" must be seen after re-reading from the APP2 marker.
+        let bridgeLength = 65_528
+        let bridge = [0xFF, 0xE1, UInt8(bridgeLength >> 8), UInt8(bridgeLength & 0xFF)]
+            + [UInt8](repeating: 0x11, count: bridgeLength - 2)
+        let first = [UInt8](Self.baseJPEG.prefix(2)) + bridge + Self.mpfAPP2()
+            + Array(Self.baseJPEG.dropFirst(2))
+        let bytes = first + Self.baseJPEG
+        let url = try Self.writeTemp(bytes)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let reader = try await URLBlockReader(url: url)
+        let end = try await JPEGSegmentWalker.walkEnd(start: 0, limit: Int64(bytes.count), reader: reader)
+        #expect(end == Int64(bytes.count))
+    }
+
     // MARK: - Entropy discipline
 
     @Test("Byte-stuffed FF and restart markers in scan data do not terminate the walk")
@@ -205,5 +384,22 @@ struct JPEGWalkerTests {
         let reader = try await URLBlockReader(url: url)
         let end = try await JPEGSegmentWalker.walkEnd(start: 0, limit: Int64(bytes.count), reader: reader)
         #expect(end == Int64(bytes.count), "stuffed FF/RST/Fill must be consumed as scan data")
+    }
+
+    @Test("Entropy fill preserves the following EOI marker prefix")
+    func entropyFillBeforeEOIIsRecognized() async throws {
+        let jpeg: [UInt8] = [
+            0xFF, 0xD8,
+            0xFF, 0xE0, 0x00, 0x02,
+            0xFF, 0xDA, 0x00, 0x02,
+            0xFF, 0xFF, 0xD9,
+        ]
+        let bytes = jpeg + [UInt8](repeating: 0xAB, count: 4096)
+        let url = try Self.writeTemp(bytes)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let reader = try await URLBlockReader(url: url)
+        let end = try await JPEGSegmentWalker.walkEnd(start: 0, limit: Int64(bytes.count), reader: reader)
+        #expect(end == Int64(jpeg.count), "fill must not hide EOI and glue trailing bytes")
     }
 }
